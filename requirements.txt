@@ -124,8 +124,9 @@ pandas==2.2.2
 pandas
 numpy
 matplotlib
-git+https://github.com/twopirllc/pandas-ta.git
+
 pandocfilters==1.5.1
+pandas-ta==0.3.14b
 parso==0.8.4
 peewee==3.17.8
 pillow==10.4.0
