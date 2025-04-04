@@ -121,7 +121,10 @@ opt_einsum==3.4.0
 overrides==7.7.0
 packaging==24.1
 pandas==2.2.2
-pandas_ta==0.3.14b0
+pandas
+numpy
+matplotlib
+git+https://github.com/twopirllc/pandas-ta.git
 pandocfilters==1.5.1
 parso==0.8.4
 peewee==3.17.8
