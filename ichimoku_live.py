@@ -1,0 +1,1313 @@
+import pandas as pd
+import pandas_ta as ta
+import numpy as np
+from binance.client import Client
+import time
+import os
+import threading
+from datetime import datetime, timedelta, UTC
+import sys
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from tools import measure
+from binance import ThreadedWebsocketManager
+from dotenv import load_dotenv
+from decimal import Decimal
+
+# Add scikit-learn imports
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import silhouette_score
+
+
+#these will be used to make asset specifice decsion on tp and sl multi]plier
+multiplier_set={'ETHUSDT':[1,3],'BTCUSDT':[1,3],'SOLUSDT':[1,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[1,3.5],'TRXUSDT':[3.5,3],'LTCUSDT':[1,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[1,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[1.5,3.5],'HBARUSDT':[1,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[1,3.5],'1000BONKUSDT':[1,3.5],'GALAUSDT':[1,3.5],'FETUSDT':[1,3.5],"GRTUSDT":[1,3.5],'1000SHIBUSDT':[1,3.5]}
+
+# --- Configuration ---
+API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
+API_SECRET = "bz1m4UlthzklqXlWoqAqXZiJE35jjT0g5uJ5cQ43vwDNnsIpPYS5OqevfBVz84iK"
+
+if not API_KEY or not API_SECRET:
+    raise ValueError("Binance API credentials not found in environment variables. Please set BINANCE_API_KEY and BINANCE_API_SECRET.")
+
+orders_lock = threading.Lock()
+orders = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price', 'choppy'])
+
+tradereport = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price', 'exit_price', 'choppy'])
+
+# Trading parameters
+INTERVAL = Client.KLINE_INTERVAL_15MINUTE
+LOOKBACK_PERIODS = 100
+TP_MULTIPLIER = 1
+SP_MULTIPLIER = 3.5
+LEVERAGE = 1
+TC = 0.0005
+
+ASSETS = ['ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'LTCUSDT','SOLUSDT',"TONUSDT",'DOGEUSDT','TRXUSDT','1000SHIBUSDT','GUNUSDT','TUTUSDT','ADAUSDT','XLMUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','GALAUSDT','FETUSDT','GRTUSDT']
+MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
+MAX_CONCURRENT_TRADES = 1  # Set this to the desired number of concurrent trades
+active_trades = []
+active_trades_lock = threading.Lock()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,  # Changed from DEBUG to INFO for production
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('trading.log')  # Add file handler
+    ]
+)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("binance").setLevel(logging.INFO)
+
+def interval_to_milliseconds(interval):
+    seconds_per_unit = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+    unit = interval[-1]
+    if unit in seconds_per_unit:
+        try:
+            multiplier = int(interval[:-1])
+            return seconds_per_unit[unit] * multiplier * 1000
+        except ValueError:
+            pass
+    logging.error(f"Interval format {interval} not fully supported for ms conversion.")
+    return None
+
+
+def print_trading_status():
+    """Print current orders and trade reports with formatting."""
+    # Clear some space before printing
+    print("\n\n")
+    
+    # Print current trades
+    print("="*100)
+    print("CURRENT ACTIVE TRADES:".center(100))
+    print("="*100)
+    if len(orders) > 0:
+        # Format the DataFrame output
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', 100)
+        pd.set_option('display.max_rows', None)
+        print(orders.to_string(index=True))
+    else:
+        print("No active trades".center(100))
+    
+    # Add spacing between sections
+    print("\n" + "="*100)
+    print("COMPLETED TRADES:".center(100))
+    print("="*100)
+    if len(tradereport) > 0:
+        # Format the DataFrame output
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', 100)
+        pd.set_option('display.max_rows', None)
+        print(tradereport.to_string(index=True))
+    else:
+        print("No completed trades".center(100))
+    print("="*100)
+    
+    # Add extra newlines after printing
+    print("\n\n")
+    
+    # Flush the output to ensure it's displayed immediately
+    sys.stdout.flush()
+
+# Add file lock for thread-safe CSV operations
+file_lock = threading.Lock()
+
+def save_trade_to_csv(trade_data: dict) -> None:
+    """Save trade data to CSV file in a thread-safe manner."""
+    try:
+        # Create trades directory if it doesn't exist
+        os.makedirs('trades', exist_ok=True)
+        
+        # Define CSV file path
+        csv_file = 'trades/trade_history_live.csv'
+        
+        # Convert trade data to DataFrame
+        trade_df = pd.DataFrame([trade_data])
+        
+        # Add timestamp for when the trade was saved
+        trade_df['saved_at'] = datetime.utcnow()
+        
+        # Use file lock to ensure thread-safe file operations
+        with file_lock:
+            # Check if file exists
+            if os.path.exists(csv_file):
+                # Append to existing file
+                trade_df.to_csv(csv_file, mode='a', header=False, index=False)
+            else:
+                # Create new file with header
+                trade_df.to_csv(csv_file, index=False)
+                
+    except Exception as e:
+        logging.error(f"Error saving trade to CSV: {e}", exc_info=True)
+
+# Add after other global/threading variables
+signal_pool = []
+signal_pool_lock = threading.Lock()
+trade_in_progress = threading.Event()
+
+class ForwardIchimokuTrader:
+    def __init__(self, symbol: str, interval: str, lookback: int,
+                 tp_multiplier: float = 1, sp_multiplier: float = 2.5,
+                 leverage: int = 1, tc: float = 0.0005) -> None:
+        self.symbol = symbol
+        self.interval = interval
+        self.interval_5m = Client.KLINE_INTERVAL_15MINUTE
+        self.lookback = lookback
+        self.required_lookback = max(lookback, 52, 27)
+        if lookback < self.required_lookback:
+            logging.warning(f"Initial lookback {lookback} increased to {self.required_lookback} for indicator calculations.")
+            self.lookback = self.required_lookback
+
+        self.interval_LTF = Client.KLINE_INTERVAL_1HOUR
+        self.interval_HTF = Client.KLINE_INTERVAL_2HOUR
+        self.tp_multiplier = tp_multiplier
+        self.sp_multiplier = sp_multiplier
+        self.leverage = leverage
+        self.tc = tc
+        
+
+        self.logger = logging.getLogger(f"{self.__class__.__name__}_{symbol}")
+        self.logger.info("Initializing Trader...")
+
+        try:
+            self.client = Client(API_KEY, API_SECRET)
+            # Test futures endpoint specifically
+            self.client.futures_ping()
+            # Set initial futures mode to one-way position mode
+            try:
+                self.client.futures_change_position_mode(dualSidePosition=False)
+            except Exception as e:
+                if "No need to change position side" not in str(e):
+                    raise
+            self.logger.info("Binance Futures client initialized and connection tested.")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Binance Futures client: {e}", exc_info=True)
+            raise
+
+        self.df = pd.DataFrame()
+        self.position = 0
+        self.entry_price = 0.0
+        self.tp_level = None
+        self.sl_level = None
+        self.highest_price_since_entry = None
+        self.lowest_price_since_entry = None
+        self.last_trade_time = None
+        self.position_size = 0.0  # Store the actual position size
+        self.orderid = None  # Stop loss order ID
+        self.tp_orderid = None  # Take profit order ID
+
+        self.ms_interval = interval_to_milliseconds(self.interval)
+        if not self.ms_interval:
+            raise ValueError("Invalid interval for millisecond conversion")
+        self.logger.info(f"Interval: {self.interval}, Milliseconds: {self.ms_interval}")
+
+    def __eq__(self, other):
+        if not isinstance(other, ForwardIchimokuTrader):
+            return False
+        return self.symbol == other.symbol
+
+    def __hash__(self):
+        return hash(self.symbol)
+
+    def _get_server_time(self):
+        try:
+            server_time = self.client.futures_time()
+            server_time_ms = server_time['serverTime']
+            return pd.to_datetime(server_time_ms, unit='ms', utc=True)  # Make sure it's UTC timezone-aware
+        except Exception as e:
+            self.logger.error(f"Failed to get server time: {e}")
+            return datetime.now(UTC)  # Return timezone-aware datetime
+    def _fetch_HTF_data(self, limit=100) -> pd.DataFrame:
+        self.logger.debug(f"Fetching latest {limit} HFT klines for {self.symbol}...")
+        try:
+            klines = self.client.futures_klines(symbol=self.symbol, interval=self.interval_HTF, limit=limit)
+            if not klines:
+                self.logger.warning("Could not fetch HFT klines (empty list).")
+                return None
+
+            cols = ['Open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time']
+            data = pd.DataFrame(klines, columns=cols + ['Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
+            data = data[cols]
+
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                data[col] = pd.to_numeric(data[col], errors='coerce')
+
+            if data[['Open', 'High', 'Low', 'Close']].isnull().any().any():
+                self.logger.warning("NaN values in HFT OHLC data after conversion.")
+                data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+
+            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
+            data.set_index('Datetime', inplace=True)
+            df_HTF = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+            if len(df_HTF) < 27:
+                self.logger.warning(f"Insufficient HFT data fetched ({len(df_HTF)} rows). Need at least 27.")
+                return None
+
+            return df_HTF
+        except Exception as e:
+            self.logger.error(f"Error fetching HFT data: {e}", exc_info=True)
+            return None
+    def _calculate_HTF_indicators(self, df_HTF: pd.DataFrame) -> pd.DataFrame:
+        if df_HTF is None or len(df_HTF) < 52:
+            self.logger.warning("Insufficient data for HFT Ichimoku calculation.")
+            return None
+
+        try:
+            ichimoku_data = ta.ichimoku(df_HTF['High'], df_HTF['Low'], df_HTF['Close'])
+            if ichimoku_data is None or not isinstance(ichimoku_data, tuple) or len(ichimoku_data) < 1 or ichimoku_data[0].empty:
+                self.logger.warning("HFT Ichimoku calculation returned unexpected/empty data.")
+                return None
+
+            temp_df_ichi_HTF = ichimoku_data[0].rename(columns={
+                'ISA_9': 'leading Span A', 'ISB_26': 'leading Span B',
+                'ITS_9': 'conversion line', 'IKS_26': 'base line',
+                'ICS_26': 'lagging Span'
+            })
+            temp_df_ichi_HTF.index = df_HTF.index[-len(temp_df_ichi_HTF):]
+            df_HTF = df_HTF.join(temp_df_ichi_HTF)
+            return df_HTF
+        except Exception as e:
+            self.logger.error(f"Error calculating HFT indicators: {e}", exc_info=True)
+            return None
+
+    def _check_HTF_confirmation(self, direction: str) -> bool:
+        df_HTF = self._fetch_HTF_data(limit=100)
+        if df_HTF is None:
+            return False
+
+        df_HTF = self._calculate_HTF_indicators(df_HTF)
+        if df_HTF is None:
+            return False
+
+        if len(df_HTF) < 27:
+            self.logger.warning("Not enough HTF data for signal check.")
+            return False
+
+        last_HTF = df_HTF.iloc[-1]
+        close_t_minus_26_5m = df_HTF['Close'].iloc[-27]
+        current_close = df_HTF['Close'].iloc[-1]
+        leading_span_A_shifted = df_HTF['leading Span A'].iloc[-26]
+
+        if pd.isna(close_t_minus_26_5m) or last_HTF[['Close', 'conversion line', 'base line']].isnull().any():
+            self.logger.warning("NaN values in HTF data for signal check.")
+            return False
+
+        buy_cond_HTF =  (last_HTF['conversion line'] > last_HTF['base line']  and (current_close > leading_span_A_shifted))
+        sell_cond_HTF = (last_HTF['conversion line'] < last_HTF['base line'] and  (current_close < leading_span_A_shifted))
+
+        if direction == 'buy':
+            self.logger.debug(f"HTF Buy confirmation: {buy_cond_HTF}")
+            return buy_cond_HTF
+        elif direction == 'sell':
+            self.logger.debug(f"HTF Sell confirmation: {sell_cond_HTF}")
+            return sell_cond_HTF
+        else:
+            self.logger.error(f"Invalid direction {direction} in _check_HTF_confirmation.")
+            return False
+    
+    def _fetch_LTF_data(self, limit=100) -> pd.DataFrame:
+        self.logger.debug(f"Fetching latest {limit} LTF klines for {self.symbol}...")
+        try:
+            klines = self.client.futures_klines(symbol=self.symbol, interval=self.interval_LTF, limit=limit)
+            if not klines:
+                self.logger.warning("Could not fetch LTF klines (empty list).")
+                return None
+
+            cols = ['Open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time']
+            data = pd.DataFrame(klines, columns=cols + ['Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
+            data = data[cols]
+
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                data[col] = pd.to_numeric(data[col], errors='coerce')
+
+            if data[['Open', 'High', 'Low', 'Close']].isnull().any().any():
+                self.logger.warning("NaN values in LTF OHLC data after conversion.")
+                data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+
+            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
+            data.set_index('Datetime', inplace=True)
+            df_LTF = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+            if len(df_LTF) < 27:
+                self.logger.warning(f"Insufficient LTF data fetched ({len(df_LTF)} rows). Need at least 27.")
+                return None
+
+            return df_LTF
+        except Exception as e:
+            self.logger.error(f"Error fetching LTF data: {e}", exc_info=True)
+            return None
+
+    def _calculate_LTF_indicators(self, df_LTF: pd.DataFrame) -> pd.DataFrame:
+        if df_LTF is None or len(df_LTF) < 52:
+            self.logger.warning("Insufficient data for LTF Ichimoku calculation.")
+            return None
+
+        try:
+            ichimoku_data = ta.ichimoku(df_LTF['High'], df_LTF['Low'], df_LTF['Close'])
+            if ichimoku_data is None or not isinstance(ichimoku_data, tuple) or len(ichimoku_data) < 1 or ichimoku_data[0].empty:
+                self.logger.warning("LTF Ichimoku calculation returned unexpected/empty data.")
+                return None
+
+            temp_df_ichi = ichimoku_data[0].rename(columns={
+                'ISA_9': 'leading Span A', 'ISB_26': 'leading Span B',
+                'ITS_9': 'conversion line', 'IKS_26': 'base line',
+                'ICS_26': 'lagging Span'
+            })
+            temp_df_ichi.index = df_LTF.index[-len(temp_df_ichi):]
+            df_LTF = df_LTF.join(temp_df_ichi)
+            return df_LTF
+        except Exception as e:
+            self.logger.error(f"Error calculating 5m indicators: {e}", exc_info=True)
+            return None
+
+    def _check_LTF_confirmation(self, direction: str) -> bool:
+        df_LTF = self._fetch_LTF_data(limit=100)
+        if df_LTF is None:
+            return False
+
+        df_LTF = self._calculate_LTF_indicators(df_LTF)
+        if df_LTF is None:
+            return False
+
+        if len(df_LTF) < 27:
+            self.logger.warning("Not enough LTF data for signal check.")
+            return False
+
+        last_LTF = df_LTF.iloc[-1]
+        close_t_minus_26_5m = df_LTF['Close'].iloc[-27]
+        current_close = df_LTF['Close'].iloc[-1]
+        leading_span_A_shifted=df_LTF['leading Span A'].iloc[-26]
+        
+        if pd.isna(close_t_minus_26_5m) or last_LTF[['Close', 'conversion line', 'base line']].isnull().any():
+            self.logger.warning("NaN values in 5m data for signal check.")
+            return False
+
+        buy_cond_LTF =  (last_LTF['conversion line'] > last_LTF['base line']  and (current_close > leading_span_A_shifted))
+        sell_cond_LTF = (last_LTF['conversion line'] < last_LTF['base line'] and  (current_close < leading_span_A_shifted))
+
+        if direction == 'buy':
+            self.logger.debug(f"5m Buy confirmation: {buy_cond_LTF}")
+            return buy_cond_LTF
+        elif direction == 'sell':
+            self.logger.debug(f"5m Sell confirmation: {sell_cond_LTF}")
+            return sell_cond_LTF
+        else:
+            self.logger.error(f"Invalid direction {direction} in _check_5m_confirmation.")
+            return False
+        
+    def _fetch_initial_data(self) -> bool:
+        self.logger.info(f"Fetching initial {self.lookback + 50} klines for {self.symbol}...")
+        try:
+            start=str(self._get_server_time()-timedelta(minutes=1600))
+            klines = self.client.futures_historical_klines(symbol=self.symbol, interval=self.interval, start_str=start)
+            klines=klines[:-1]
+            if not klines:
+                self.logger.error("Could not fetch initial klines (received empty list).")
+                return False
+
+            cols = ['Open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time']
+            data = pd.DataFrame(klines, columns=cols + ['Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
+            data = data[cols]
+
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                data[col] = pd.to_numeric(data[col], errors='coerce')
+
+            if data[['Open', 'High', 'Low', 'Close']].isnull().any().any():
+                self.logger.warning("NaN values found in OHLC data after numeric conversion during initial fetch.")
+                data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+
+            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms', utc=True)  # Make timezone-aware
+            data.set_index('Datetime', inplace=True)
+            self.df = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+            #print(self.df.iloc[-1]) for debugging 
+            if len(self.df) < self.required_lookback:
+                self.logger.error(f"Insufficient valid initial data fetched ({len(self.df)} rows). Need at least {self.required_lookback}.")
+                return False
+
+            if not self.df.index.is_monotonic_increasing:
+                self.logger.warning("Initial DataFrame index is not monotonic increasing. Sorting...")
+                self.df.sort_index(inplace=True)
+
+            self.logger.info(f"Successfully fetched and processed {len(self.df)} initial candles. Last candle time: {self.df.index[-1]}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error fetching initial data: {e}", exc_info=True)
+            return False
+
+    def _fetch_latest_candle(self) -> bool:
+        self.logger.debug("Attempting to fetch latest candle...")
+        try:
+            start=str(self._get_server_time()-timedelta(minutes=60))
+            klines = self.client.futures_historical_klines(symbol=self.symbol, interval=self.interval, start_str=start)
+            klines=klines[:-1]
+            if not klines or len(klines) < 2:
+                self.logger.warning("Could not fetch latest klines or not enough data yet (< 2).")
+                return False
+
+            latest_kline = klines[-1]
+            close_time_ms = latest_kline[6]
+            latest_dt = pd.to_datetime(close_time_ms, unit='ms', utc=True)  # Make timezone-aware
+
+            if self.df.empty or latest_dt <= self.df.index[-1]:
+                return False
+
+            cols = ['Open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time']
+            new_data = pd.DataFrame([latest_kline], columns=cols + ['Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
+            new_data = new_data[cols]
+
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                new_data[col] = pd.to_numeric(new_data[col], errors='coerce')
+            if new_data[['Open', 'High', 'Low', 'Close']].isnull().any().any():
+                self.logger.error(f"NaN value detected in OHLC for new candle at {latest_dt}. Skipping append.")
+                return False
+
+            new_data['Datetime'] = latest_dt
+            new_data.set_index('Datetime', inplace=True)
+            new_row = new_data[['Open', 'High', 'Low', 'Close', 'Volume']].iloc[0]
+            #print(new_row) for debuggging 
+
+            self.df = pd.concat([self.df, new_row.to_frame().T])
+            if not self.df.index.is_monotonic_increasing:
+                self.logger.warning(f"Index became non-monotonic after adding candle {latest_dt}. Sorting...")
+                self.df.sort_index(inplace=True)
+
+            max_len = self.lookback + 100
+            if len(self.df) > max_len:
+                self.logger.debug(f"Trimming DataFrame from {len(self.df)} to {max_len} rows.")
+                self.df = self.df.iloc[-max_len:]
+
+            self.logger.info(f"New candle appended: {self.df.index[-1]}, Close: {self.df['Close'].iloc[-1]:.4f}, DF rows: {len(self.df)}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error fetching/appending latest candle: {e}", exc_info=True)
+            return False
+
+    def _calculate_indicators(self) -> bool:
+        self.logger.debug(f"Calculating indicators for {len(self.df)} rows...")
+        min_data_needed = self.required_lookback
+        if len(self.df) < min_data_needed:
+            self.logger.warning(f"Not enough data ({len(self.df)}, need {min_data_needed}) for all indicator calculations.")
+            return False
+        try:
+            ichimoku_data = ta.ichimoku(self.df['High'], self.df['Low'], self.df['Close'])
+            if ichimoku_data is None or not isinstance(ichimoku_data, tuple) or len(ichimoku_data) < 1 or ichimoku_data[0].empty:
+                self.logger.warning("Ichimoku calculation returned unexpected/empty data.")
+                return False
+
+            temp_df_ichi = ichimoku_data[0].rename(columns={
+                'ISA_9': 'leading Span A', 'ISB_26': 'leading Span B',
+                'ITS_9': 'conversion line', 'IKS_26': 'base line',
+                'ICS_26': 'lagging Span'
+            })
+            temp_df_ichi.index = self.df.index[-len(temp_df_ichi):]
+
+            if len(self.df) >= 15:
+                self.df['atr'] = ta.atr(self.df['High'],self.df['Low'],self.df['Close'], length=14)
+                self.df['choppy'] = ta.chop(self.df['High'],self.df['Low'],self.df['Close'])
+                psar_data = ta.psar(self.df['High'],self.df['Low'],self.df['Close'])
+
+                psar_cols_to_drop = ['PSAR_Long', 'PSAR_Short', 'PSAR_Reversal', 'PSARaf_0.02_0.2', 
+                                   'PSARl_0.02_0.2', 'PSARs_0.02_0.2', 'PSARr_0.02_0.2']
+                existing_cols_to_drop = [col for col in psar_cols_to_drop if col in self.df.columns]
+                if existing_cols_to_drop:
+                    self.df = self.df.drop(columns=existing_cols_to_drop)
+                    self.logger.debug(f"Dropped existing PSAR columns: {existing_cols_to_drop}")
+                
+                # Rename PSAR columns to our standard names
+                psar_data = psar_data.rename(columns={'PSARl_0.02_0.2':'PSAR_Long',"PSARs_0.02_0.2":'PSAR_Short','PSARr_0.02_0.2':"PSAR_Reversal"})
+                
+                # Ensure PSAR has the same index as the main DataFrame
+                if not psar_data.empty:
+                    psar_data.index = self.df.index[-len(psar_data):]
+                    
+                    # Use join instead of concat to avoid index issues
+                    self.df = self.df.join(psar_data)
+            else:
+                self.logger.warning(f"Not enough data ({len(self.df)}) for ATR(14) calculation.")
+                self.df['atr'] = np.nan
+
+            ichimoku_cols_to_drop = [col for col in temp_df_ichi.columns if col in self.df.columns]
+            if ichimoku_cols_to_drop:
+                self.df = self.df.drop(columns=ichimoku_cols_to_drop)
+
+            self.df = self.df.join(temp_df_ichi)
+            last_row = self.df.iloc[-1]
+            if last_row[['conversion line', 'base line', 'atr']].isnull().any():
+                self.logger.warning(f"Last row has NaN indicators: {last_row[['conversion line', 'base line', 'atr']]}")
+            else:
+                self.logger.debug("Last row indicators are valid.")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error calculating indicators: {e}", exc_info=True)
+            return False
+
+    def _check_signals(self) -> tuple[bool, bool]:
+        self.logger.debug("Checking signals...")
+        current_length = len(self.df)
+        if current_length < 27:
+            self.logger.warning(f"DataFrame length ({current_length}) is less than 27. Cannot perform lagging span comparison yet.")
+            return False, False
+
+        last = self.df.iloc[-1]
+        last_index_name = last.name
+
+        required_cols = ['Close', 'conversion line', 'base line','leading Span A','leading Span B']
+        if last[required_cols].isnull().any():
+            self.logger.warning(f"Signal check skipped: NaN in required columns at {last_index_name}.")
+            return False, False
+
+        try:
+            target_past_index_pos = -1 - 26
+            target_past_index = self.df.index[target_past_index_pos]
+            close_t_minus_26 = self.df.loc[target_past_index, 'Close']
+        except (IndexError, KeyError) as e:
+            self.logger.error(f"Error accessing T-26 Close: {e}. Length: {current_length}")
+            return False, False
+
+        if pd.isna(close_t_minus_26):
+            self.logger.warning(f"Signal check skipped: Close at {target_past_index} is NaN.")
+            return False, False
+
+        current_close = last['Close']
+        conversion_line = last['conversion line']
+        base_line = last['base line']
+        leading_span_A = last['leading Span A']
+        leading_span_B = last['leading Span B']
+        choppy = last['choppy']
+        leading_Span_A_shifted = self.df['leading Span A'].iloc[-26]
+
+        
+
+        # Check if PSAR columns exist and get values
+        psar_long = None
+        psar_short = None
+        
+        if 'PSAR_Long' in self.df.columns and 'PSAR_Short' in self.df.columns:
+            psar_long = last['PSAR_Long']
+            psar_short = last['PSAR_Short']
+            
+            # Handle Series objects
+            if isinstance(psar_long, pd.Series):
+                psar_long = psar_long.iloc[-1]
+            if isinstance(psar_short, pd.Series):
+                psar_short = psar_short.iloc[-1]
+                
+            # Handle numpy/pandas objects
+            if hasattr(psar_long, 'item'):
+                try:
+                    psar_long = psar_long.item()
+                except Exception:
+                    pass
+            if hasattr(psar_short, 'item'):
+                try:
+                    psar_short = psar_short.item()
+                except Exception:
+                    pass
+        
+
+        buy_signal = (
+            (current_close > close_t_minus_26)
+            and (conversion_line > base_line)
+            and (leading_span_A > leading_span_B)
+            and (current_close > leading_Span_A_shifted)
+            and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
+        )
+        sell_signal = (
+            (current_close < close_t_minus_26) 
+            and (conversion_line < base_line) 
+            and (leading_span_B > leading_span_A) 
+            and (current_close < leading_Span_A_shifted)  
+            and (not(pd.isna(psar_short)))  # Only checks if PSAR exists, not its value
+        )
+
+
+        self.logger.debug(f"15min. Signals @ {last_index_name}: Buy={buy_signal}, Sell={sell_signal}")
+        self.logger.debug(f"Signal components - Close: {current_close:.4f}, T-26: {close_t_minus_26:.4f}, Conv: {conversion_line:.4f}, Base: {base_line:.4f}, LS_A: {leading_span_A:.4f}, LS_B: {leading_span_B:.4f}, PSAR_L: {psar_long:.4f}, PSAR_S: {psar_short:.4f}")
+        return buy_signal, sell_signal
+    
+    def _update_sl(self, new_sl_price):
+        try:
+            if not hasattr(self, '_price_precision') or self._price_precision is None:
+                exchange_info = self.client.futures_exchange_info()
+                symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == self.symbol)
+                self._price_precision = 2
+                for f in symbol_info['filters']:
+                    if f['filterType'] == 'PRICE_FILTER':
+                        tick_size_str = f['tickSize']
+                        if Decimal(tick_size_str) < 1:
+                            self._price_precision = abs(Decimal(tick_size_str).as_tuple().exponent)
+                        break
+            
+            self.sl_level = round(new_sl_price, self._price_precision)
+            
+            # Cancel existing SL orders first
+            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+            for order in open_orders:
+                if order['type'] == 'STOP_MARKET' and order['reduceOnly']:
+                    self.client.futures_cancel_order(symbol=self.symbol, orderId=order['orderId'])
+                    self.logger.info(f"Cancelled existing stop-loss order {order['orderId']}")
+            
+            time.sleep(0.2) # Give time for cancellation to process
+
+            # Create new SL order
+            side = Client.SIDE_SELL if self.position == 1 else Client.SIDE_BUY
+            sl_params = {
+                'symbol': self.symbol, 'side': side, 'type': 'STOP_MARKET',
+                'quantity': self.position_size, 'stopPrice': self.sl_level, 'reduceOnly': True
+            }
+            sl_order = self.client.futures_create_order(**sl_params)
+            self.orderid = sl_order['orderId']
+            self.logger.info(f"SUCCESS: Updated trailing stop. New SL order ID: {self.orderid} at {self.sl_level}")
+
+        except Exception as e:
+            self.logger.error(f"FAILED to update SL order: {e}", exc_info=True)
+            self.orderid = None
+
+    def manage_position(self) -> None:
+        try:
+            # Always get the real-time position status from the exchange
+            positions = self.client.futures_position_information()
+            active_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
+
+            # If the bot thinks it's in a position, but the exchange says it's not, reset.
+            if self.position != 0 and not active_position:
+                self.logger.info(f"Position for {self.symbol} is closed on the exchange. Resetting state.")
+                self._reset_position_state()
+                return
+
+            # If there's no active position, check for new signals.
+            if not active_position:
+                last_row = self.df.iloc[-1]
+                current_price = last_row['Close']
+                atr = last_row['atr']
+                hft_buy = self._check_HTF_confirmation('buy')
+                hft_sell = self._check_HTF_confirmation('sell')
+                ltf_buy = self._check_LTF_confirmation('buy')
+                ltf_sell = self._check_LTF_confirmation('sell')
+                buy_signal, sell_signal = self._check_signals()
+                self.logger.info(f"Signal check for {self.symbol}: HTF_buy={hft_buy}, LTF_buy={ltf_buy}, buy_signal={buy_signal}, HTF_sell={hft_sell}, LTF_sell={ltf_sell}, sell_signal={sell_signal}")
+                if hft_buy and ltf_buy and buy_signal:
+                    self.logger.info(f"Submitting BUY signal for {self.symbol}")
+                    self._submit_signal('buy', current_price, atr, last_row['choppy'])
+                elif hft_sell and ltf_sell and sell_signal:
+                    self.logger.info(f"Submitting SELL signal for {self.symbol}")
+                    self._submit_signal('sell', current_price, atr, last_row['choppy'])
+                return
+
+            # If we are here, there is an active position to manage.
+            # Sync the bot's internal state with the exchange.
+            self.position = 1 if float(active_position['positionAmt']) > 0 else -1
+            self.entry_price = float(active_position['entryPrice'])
+            self.position_size = abs(float(active_position['positionAmt']))
+
+            # Now, manage the trailing stop.
+            last_row = self.df.iloc[-1]
+            current_price = last_row['Close']
+            atr = last_row['atr']
+            
+            if self.position == 1:
+                self.highest_price_since_entry = max(self.highest_price_since_entry, current_price)
+                new_sl_level = self.highest_price_since_entry - (multiplier_set[self.symbol][1] * atr)
+                if self.sl_level is None or new_sl_level > self.sl_level:
+                    self._update_sl(new_sl_level)
+            elif self.position == -1:
+                self.lowest_price_since_entry = min(self.lowest_price_since_entry, current_price)
+                new_sl_level = self.lowest_price_since_entry + (multiplier_set[self.symbol][1] * atr)
+                if self.sl_level is None or new_sl_level < self.sl_level:
+                    self._update_sl(new_sl_level)
+
+        except Exception as e:
+            self.logger.error(f"Error in manage_position: {e}", exc_info=True)
+
+
+    def _cleaning_existing_order(self):
+
+        # First try to cancel all open orders
+        try:
+            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+            for order in open_orders:
+                try:
+                    self.client.futures_cancel_order(
+                        symbol=self.symbol,
+                        orderId=order['orderId']
+                    )
+                    self.logger.info(f"Cancelled order {order['orderId']} for {self.symbol}")
+                except Exception as e:
+                    self.logger.error(f"Failed to cancel order {order['orderId']}: {e}")
+                    # Don't return here, continue trying to cancel other orders
+                    continue
+            
+            if open_orders:  # If we had any orders to cancel, wait a moment
+                time.sleep(0.5)
+        except Exception as e:
+            self.logger.error(f"Error checking open orders: {e}")
+            
+
+    def enter_position(self, direction, entry_price, atr, concurrent_slot_count: int = 1) -> None:
+        self._cleaning_existing_order()
+        self.logger.info('existing orders are cleaned')
+        global orders
+        self.logger.info(f"ENTER_POSITION called for {self.symbol}: direction={direction}, price={entry_price:.4f}, atr={atr:.4f}")
+
+        try:
+            positions = self.client.futures_position_information()
+            existing_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
+
+            if existing_position:
+                self.logger.warning(f"Position for {self.symbol} already exists on the exchange. Syncing state and skipping new entry.")
+                self.position = 1 if float(existing_position['positionAmt']) > 0 else -1
+                self.entry_price = float(existing_position['entryPrice'])
+                self.position_size = abs(float(existing_position['positionAmt']))
+                
+                with active_trades_lock:
+                    if self not in active_trades:
+                        active_trades.append(self)
+                return
+        except Exception as e:
+            self.logger.error(f"Error checking for existing positions for {self.symbol}: {e}")
+            return
+
+        # Atomically check and reserve a trade slot
+        with active_trades_lock:
+            if self.position != 0:
+                self.logger.warning(f"Attempted to enter position for {self.symbol}, but already in position {self.position}.")
+                return
+            
+            if len(active_trades) >= MAX_CONCURRENT_TRADES:
+                self.logger.info(f"Cannot enter trade for {self.symbol}, max concurrent trades of {MAX_CONCURRENT_TRADES} reached.")
+                return
+            
+            # Reserve our spot
+            active_trades.append(self)
+            self.logger.info(f"Reserved trade slot for {self.symbol}. Active trades: {[t.symbol for t in active_trades]}")
+        
+        try:
+            # --- Start of actual trade execution ---
+            self.logger.info(f"Step 1: Starting position entry process")
+            
+            # Get available balance from futures account
+            self.logger.info(f"Step 5: Getting futures account balance...")
+            available_balance = self.client.futures_account_balance()
+            usdt_balance = 0
+            for balance in available_balance:
+                if balance['asset'] == 'USDT':
+                    usdt_balance = float(balance['availableBalance'])  # Use availableBalance instead of balance
+                    break
+            self.logger.info(f"Step 6: Account balance retrieved: {usdt_balance} USDT")
+            
+            if usdt_balance < 1:
+                self.logger.warning(f"Insufficient balance ({usdt_balance} USDT) for trading. Skipping entry.")
+                self._reset_position_state() # Release our reserved slot
+                return
+
+            # Set position state first, but entry price will be updated later
+            self.position = direction
+            
+            self.logger.info(f"Step 11: Setting leverage...")
+            try:
+                choppy_value = self.df['choppy'].iloc[-1] if 'choppy' in self.df.columns else 50
+                leverage_to_set = self.leverage * 2 if choppy_value < 38 else self.leverage
+                self.client.futures_change_leverage(symbol=self.symbol, leverage=leverage_to_set)
+                self.logger.info(f"Set leverage to {leverage_to_set}x for {self.symbol}")
+            except Exception as e:
+                if "leverage not modified" not in str(e):
+                    self.logger.warning(f"Could not set leverage for {self.symbol}: {e}")
+
+            self.logger.info(f"Step 12: Setting margin type...")
+            try:
+                self.client.futures_change_margin_type(symbol=self.symbol, marginType='CROSSED')
+                self.logger.debug(f"Set margin type to CROSSED for {self.symbol}")
+            except Exception as e:
+                if "No need to change margin type" not in str(e):
+                    self.logger.debug(f"Could not set margin type for {self.symbol}: {e}")
+            
+            exchange_info = self.client.futures_exchange_info()
+            symbol_info = next((s for s in exchange_info['symbols'] if s['symbol'] == self.symbol), None)
+            
+            if not symbol_info or symbol_info['status'] != 'TRADING':
+                self.logger.error(f"Symbol {self.symbol} not found or not trading.")
+                self._reset_position_state()
+                return
+                    
+            self.logger.info(f"Step 14: Calculating position size...")
+
+            trade_capital = (usdt_balance / MAX_CONCURRENT_TRADES)
+            if leverage_to_set==1:
+                margin_to_use = trade_capital * 0.9
+            else:
+                margin_to_use = trade_capital * 0.90
+            self.logger.info(f"Capital per trade: {trade_capital:.2f} USDT. Margin to use: {margin_to_use:.2f} USDT")
+            
+            # Calculate the notional value of the position using the correct leverage
+            notional_value = margin_to_use * leverage_to_set
+
+            min_notional = 5.0
+            if notional_value < min_notional:
+                self.logger.warning(f"Position notional value (${notional_value:.2f}) is below minimum (${min_notional}). Skipping trade.")
+                self._reset_position_state()
+                return
+
+            # Calculate position size based on signal price
+            position_size = notional_value / entry_price
+            
+            # Get quantity precision from symbol info
+            qty_precision = 0
+            min_qty = 0.0
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'LOT_SIZE':
+                    step_size_str = f['stepSize']
+                    min_qty = float(f['minQty'])
+                    if Decimal(step_size_str) < 1:
+                        qty_precision = abs(Decimal(step_size_str).as_tuple().exponent)
+                    break
+            
+            # Round to the correct precision and ensure it meets minimum quantity
+            position_size = max(round(position_size, qty_precision), min_qty)
+            
+            if position_size * entry_price < min_notional:
+                self.logger.warning(f"Notional value below minimum after adjustments. Skipping.")
+                self._reset_position_state()
+                return
+
+            if position_size <= 0:
+                self.logger.error(f"Invalid position size after calculations: {position_size}")
+                self._reset_position_state()
+                return
+            
+            self.position_size = position_size
+            # Place entry order
+            side = Client.SIDE_BUY if direction == 1 else Client.SIDE_SELL
+            self.logger.info(f"Placing market {side} order for {self.symbol}: quantity={position_size}")
+            
+            try:
+                order_params = {
+                    'symbol': self.symbol,
+                    'side': side,
+                    'type': Client.ORDER_TYPE_MARKET,
+                    'quantity': self.position_size
+                }
+                entry_order = self.client.futures_create_order(**order_params)
+                self.logger.info(f"SUCCESS: Entry order placed. Full response: {entry_order}")
+
+                actual_entry_price = float(entry_order.get('avgPrice', 0.0))
+
+                if actual_entry_price == 0.0:
+                    time.sleep(0.5)  # Wait for fill
+                    order_details = self.client.futures_get_order(symbol=self.symbol, orderId=entry_order['orderId'])
+                    actual_entry_price = float(order_details.get('avgPrice', 0.0))
+
+                if actual_entry_price == 0.0:
+                    self.logger.error("Could not determine actual entry price. Closing position.")
+                    self._reset_position_state()
+                    return
+                
+                self.entry_price = actual_entry_price
+                self.logger.info(f"Step 10: Position state set - position={self.position}, entry_price={self.entry_price}")
+
+            except Exception as e:
+                self.logger.error(f"FAILED TO PLACE ENTRY ORDER. Error: {e}", exc_info=True)
+                self._reset_position_state()
+                return
+
+            price_precision = 0
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'PRICE_FILTER':
+                    tick_size_str = f['tickSize']
+                    if Decimal(tick_size_str) < 1:
+                        price_precision = abs(Decimal(tick_size_str).as_tuple().exponent)
+                    break
+            
+            # Calculate TP/SL with actual entry price
+            if direction == 1:
+                self.tp_level = round(self.entry_price + (atr * multiplier_set[self.symbol][0]), price_precision)
+                self.sl_level = round(self.entry_price - (atr * multiplier_set[self.symbol][1]), price_precision)
+            else: # direction == -1
+                self.tp_level = round(self.entry_price - (atr * multiplier_set[self.symbol][0]), price_precision)
+                self.sl_level = round(self.entry_price + (atr * multiplier_set[self.symbol][1]), price_precision)
+
+            # Place SL and TP orders
+            sl_side = Client.SIDE_SELL if direction == 1 else Client.SIDE_BUY
+            tp_side = sl_side
+
+            try:
+                sl_params = {
+                    'symbol': self.symbol, 'side': sl_side, 'type': 'STOP_MARKET',
+                    'quantity': self.position_size, 'stopPrice': self.sl_level, 'reduceOnly': True
+                }
+                sl_order = self.client.futures_create_order(**sl_params)
+                self.orderid = sl_order['orderId']
+                self.logger.info(f"SUCCESS: Stop loss order placed. ID: {self.orderid}")
+            except Exception as e:
+                self.logger.error(f"FAILED TO PLACE SL ORDER. Error: {e}", exc_info=True)
+
+            try:
+                tp_params = {
+                    'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
+                    'quantity': self.position_size, 'stopPrice': self.tp_level, 'reduceOnly': True
+                }
+                tp_order = self.client.futures_create_order(**tp_params)
+                self.tp_orderid = tp_order['orderId']
+                self.logger.info(f"SUCCESS: Take profit order placed. ID: {self.tp_orderid}")
+            except Exception as e:
+                self.logger.error(f"FAILED TO PLACE TP ORDER. Error: {e}", exc_info=True)
+
+            # Initialize tracking variables
+            self.highest_price_since_entry = self.entry_price
+            self.lowest_price_since_entry = self.entry_price
+            
+        except Exception as e:
+            self.logger.error(f"Error in position entry for {self.symbol}: {e}", exc_info=True)
+            self._reset_position_state() # Ensure we release our slot on any error
+            return
+            
+        # Update order tracking
+        new_order_data = {
+            'entry_time': datetime.now(UTC),
+            'symbol': self.symbol,
+            'side': 'BUY' if direction == 1 else 'SELL',
+            'entry_price': self.entry_price,
+            'tp_price': self.tp_level,
+            'sl_price': self.sl_level,
+            'choppy': self.df['choppy'].iloc[-1] if 'choppy' in self.df.columns else 0
+        }
+
+        with orders_lock:
+            new_order_df = pd.DataFrame([new_order_data])
+            orders = pd.concat([orders, new_order_df], ignore_index=True)
+            self.order_id = orders.index[-1]
+            new_order_data['order_id'] = self.order_id
+
+        self.logger.info(f"New position entered | OrderID: {self.order_id}")
+
+    def handle_socket_message(self,msg):
+        if msg['e'] == 'ORDER_TRADE_UPDATE':
+            order = msg['o']
+            order_type = order['ot']
+            status = order['X']
+            stop_price = order.get('sp')
+
+            if status == 'FILLED':
+                if order_type == 'STOP_MARKET':
+                    self._reset_position_state()
+                elif order_type == 'TAKE_PROFIT_MARKET':
+                    self._reset_position_state()
+                else:
+                    print(f"Other order filled: {order_type} at {order.get('ap')}")
+
+    def _reset_position_state(self):
+        self.logger.info(f"Resetting position state for {self.symbol}. Attempting to cancel any open orders.")
+        
+        # First try to cancel all open orders
+        try:
+            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+            for order in open_orders:
+                try:
+                    self.client.futures_cancel_order(
+                        symbol=self.symbol,
+                        orderId=order['orderId']
+                    )
+                    self.logger.info(f"Cancelled order {order['orderId']} for {self.symbol}")
+                except Exception as e:
+                    self.logger.error(f"Failed to cancel order {order['orderId']}: {e}")
+                    # Don't return here, continue trying to cancel other orders
+                    continue
+            
+            if open_orders:  # If we had any orders to cancel, wait a moment
+                time.sleep(0.5)
+        except Exception as e:
+            self.logger.error(f"Error checking open orders: {e}")
+            # Don't return here, continue with state reset
+        
+        # Always reset state variables, even if order cancellation failed
+        try:
+            # Close any open position
+            position = self.client.futures_position_information(symbol=self.symbol)
+            if position and float(position[0]['positionAmt']) != 0:
+                self.client.futures_create_order(
+                    symbol=self.symbol,
+                    type='MARKET',
+                    side='SELL' if float(position[0]['positionAmt']) > 0 else 'BUY',
+                    quantity=abs(float(position[0]['positionAmt'])),
+                    reduceOnly=True
+                )
+                self.logger.info(f"Closed open position for {self.symbol}")
+        except Exception as e:
+            self.logger.error(f"Error closing position: {e}")
+
+        # Always reset these variables regardless of any errors above
+        self.position = 0
+        self.entry_price = 0.0
+        self.tp_level = None
+        self.sl_level = None
+        self.highest_price_since_entry = None
+        self.lowest_price_since_entry = None
+        self.position_size = 0.0
+        self.orderid = None
+        self.tp_orderid = None
+
+        with active_trades_lock:
+            if self in active_trades:
+                active_trades.remove(self)
+                self.logger.info(f"Removed {self.symbol} from active trades. Active trades: {len(active_trades)}")
+        
+        trade_in_progress.clear()
+    def run(self) -> None:
+        self.logger.info(f"Starting trader for {self.symbol}") 
+        if not self._fetch_initial_data():
+            self.logger.error("Failed to fetch initial data. Stopping.")
+            return
+
+        if not self._calculate_indicators():
+            self.logger.warning("Initial indicator calculation failed. Will retry on next candle.")
+        else:
+            self.manage_position()
+
+        # Print status after first run for last asset
+        if self.symbol == ASSETS[-1]:
+            print_trading_status()
+
+        loop_count = 0
+        while True:
+            try:
+                loop_count += 1
+                server_now = self._get_server_time()  # This is now timezone-aware
+                
+                # Validate DataFrame state
+                if self.df.empty or len(self.df) < 2:
+                    self.logger.error("DataFrame is empty or has insufficient data. Attempting to refetch initial data.")
+                    if not self._fetch_initial_data():
+                        self.logger.error("Failed to refetch initial data. Sleeping for 30 seconds.")
+                        time.sleep(30)
+                        continue
+
+                # Use the last candle's timestamp (self.df.index[-1]) instead of [-2]
+                last_candle_time_utc = self.df.index[-1]  # Already timezone-aware from _fetch_initial_data
+                self.logger.debug(f"Last candle time: {last_candle_time_utc}, Server time: {server_now}")
+
+                # Calculate next candle time
+                next_candle_time_utc = last_candle_time_utc + pd.Timedelta(milliseconds=self.ms_interval)
+                wait_seconds = (next_candle_time_utc - server_now).total_seconds() + 1
+
+                # Validate wait time
+                if wait_seconds < -self.ms_interval / 1000:
+                    self.logger.warning(f"Calculated wait time is significantly negative ({wait_seconds:.1f}s). Possible timestamp mismatch. Last candle: {last_candle_time_utc}, Server: {server_now}")
+                    wait_seconds = 0
+                elif wait_seconds > self.ms_interval / 1000 + 5:
+                    self.logger.warning(f"Calculated wait time ({wait_seconds:.1f}s) exceeds expected interval. Clamping to interval + 5s.")
+                    wait_seconds = self.ms_interval / 1000 + 5
+
+                if wait_seconds > 0:
+                    self.logger.debug(f"Waiting {wait_seconds:.2f} seconds until next expected candle time ({next_candle_time_utc})...")
+                    time.sleep(wait_seconds)
+
+                if loop_count % 10 == 0:
+                    self.logger.debug(f"Current DF shape: {self.df.shape}, Last candle: {self.df.index[-1]}, Close: {self.df['Close'].iloc[-1]:.4f}")
+                    self.logger.debug(f"Current Position: {self.position}")
+                    self.logger.debug(f"---------------------------------")
+
+                new_candle_fetched = self._fetch_latest_candle()
+                if new_candle_fetched:
+                    indicators_ok = self._calculate_indicators()
+                    if indicators_ok:
+                        self.manage_position()
+                        self.logger.debug("Position management completed successfully.")
+                        
+                        # Print status after each candle for last asset
+                        if self.symbol == ASSETS[-1]:
+                            print_trading_status()
+                    else:
+                        self.logger.warning("Skipping position management due to indicator calculation issues on new candle.")
+                else:
+                    self.logger.debug("No new candle fetched in this cycle.")
+                    time.sleep(min(15, self.ms_interval / 1000 / 4))
+
+            except KeyboardInterrupt:
+                self.logger.info("Forward testing stopped by user.")
+                break
+            except Exception as e:
+                self.logger.error(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
+                self.logger.info("Attempting to continue after 30 seconds...")
+                time.sleep(30)
+        
+        self.logger.info("Forward testing loop finished.")
+        tradereport.to_csv('trader_report.csv', index=False)
+
+    def _submit_signal(self, direction, price, atr, choppy):
+        signal = {
+            'symbol': self.symbol,
+            'direction': direction,
+            'price': price,
+            'atr': atr,
+            'choppy': choppy,
+            'trader': self,
+            'tp_to_sl_ratio': multiplier_set[self.symbol][0] / multiplier_set[self.symbol][1]
+        }
+        with signal_pool_lock:
+            signal_pool.append(signal)
+            logging.info(f"Signal added to pool: {self.symbol} {direction} at {price:.4f}, pool size: {len(signal_pool)}")
+
+    @staticmethod
+    def pick_and_execute_best_trade():
+        signals_to_execute = []
+        with signal_pool_lock:
+            if not signal_pool:
+                return
+
+            available_slots = 0
+            with active_trades_lock:
+                # Remove any traders that are no longer in a position
+                active_trades[:] = [t for t in active_trades if t.position != 0]
+                
+                available_slots = MAX_CONCURRENT_TRADES - len(active_trades)
+                logging.info(f"Signal pool size: {len(signal_pool)}, Available slots: {available_slots}, Active trades: {[t.symbol for t in active_trades]}")
+            
+            if available_slots <= 0:
+                if signal_pool:
+                    logging.info("No available trade slots.")
+                    signal_pool.clear()
+                return
+
+            sorted_signals = sorted(signal_pool, key=lambda s: (s['choppy'], -s['atr'], -s['tp_to_sl_ratio']))
+            signals_to_execute = sorted_signals[:available_slots]
+            logging.info(f"Selected {len(signals_to_execute)} signals: {[(s['symbol'], s['direction']) for s in signals_to_execute]}")
+            signal_pool.clear()
+
+    # Execute trades without holding any locks from this method
+        for signal in signals_to_execute:
+            trader = signal['trader']
+            logging.info(f"Attempting to execute trade for {trader.symbol}...")
+            try:
+                if signal['direction'] == 'buy':
+                    trader.enter_position(1, signal['price'], signal['atr'], concurrent_slot_count=len(signals_to_execute))
+                elif signal['direction'] == 'sell':
+                    trader.enter_position(-1, signal['price'], signal['atr'], concurrent_slot_count=len(signals_to_execute))
+            except Exception as e:
+                logging.error(f"Error while calling enter_position for {trader.symbol}: {e}", exc_info=True)
+
+if __name__ == "__main__":
+    try:
+        # Initialize Binance client
+        client = Client(API_KEY, API_SECRET)
+        
+        # Test connection
+        try:
+            client.ping()
+            logging.info("Successfully connected to Binance API")
+        except Exception as e:
+            logging.critical(f"Failed to connect to Binance API: {e}")
+            sys.exit(1)
+        
+        # Check account balance
+        try:
+            account_balance = client.futures_account_balance()
+            usdt_balance = 0
+            for balance in account_balance:
+                if balance['asset'] == 'USDT':
+                    usdt_balance = float(balance['balance'])
+                    break
+            
+            effective_buying_power = usdt_balance * LEVERAGE
+            logging.info(f"Current USDT futures balance: ${usdt_balance:.2f}")
+            logging.info(f"Effective buying power with {LEVERAGE}x leverage: ${effective_buying_power:.2f}")
+            
+            min_margin_for_trade = 5.0 / LEVERAGE  # Minimum margin needed for $5 trade
+            if usdt_balance < min_margin_for_trade:
+                logging.critical(f"Insufficient balance: ${usdt_balance:.2f}. Minimum required for $5 trade with {LEVERAGE}x leverage: ${min_margin_for_trade:.2f}")
+                sys.exit(1)
+            elif usdt_balance < 2.0:  # Minimum recommended for multiple assets
+                logging.warning(f"Low balance warning: ${usdt_balance:.2f} may be insufficient for trading multiple assets simultaneously")
+                
+        except Exception as e:
+            logging.error(f"Error checking account balance: {e}")
+            # Continue anyway, individual trades will check balance
+        
+        # Get trending assets
+        try:
+            
+            logging.info(f"Found none trending assets")
+        except Exception as e:
+            logging.error(f"Error getting trending assets: {e}")
+            trending_assets = []
+        
+        # Validate the specified assets list
+        
+        
+        # Combine validated and trending assets
+        all_assets = ASSETS  # Using set to remove any duplicates
+        logging.info(f"Total assets to trade: {len(all_assets)}")
+        
+        # Setup leverage for all symbols
+        """try:
+            successful_symbols = setup_leverage_for_symbols(client, all_assets, LEVERAGE)
+            if not successful_symbols:
+                logging.error("Failed to setup leverage for any symbols. Exiting.")
+                sys.exit(1)
+            # Only trade symbols where leverage was successfully set
+            all_assets = successful_symbols
+            logging.info(f"Ready to trade {len(all_assets)} symbols with {LEVERAGE}x leverage")
+        except Exception as e:
+            logging.error(f"Error setting up leverage: {e}")
+            # Continue anyway, individual traders will try to set leverage
+        """
+        # Initialize and start trading threads
+        threads = []
+        traders = []
+        for asset in all_assets:
+            try:
+                trader = ForwardIchimokuTrader(
+                    symbol=asset,
+                    interval=INTERVAL,
+                    lookback=LOOKBACK_PERIODS,
+                    tp_multiplier=TP_MULTIPLIER,
+                    sp_multiplier=SP_MULTIPLIER,
+                    leverage=LEVERAGE,
+                    tc=TC,
+                    
+                )
+                traders.append(trader)
+                thread = threading.Thread(target=trader.run)
+                threads.append(thread)
+                thread.start()
+                logging.info(f"Started trading thread for {asset}")
+            except Exception as e:
+                logging.critical(f"Failed to initialize trader for {asset}: {e}", exc_info=True)
+
+        # Add a thread to periodically pick and execute the best trade
+        def trade_picker_loop():
+            while True:
+                ForwardIchimokuTrader.pick_and_execute_best_trade()
+                time.sleep(5)  # Check every 5 seconds
+
+        picker_thread = threading.Thread(target=trade_picker_loop, daemon=True)
+        picker_thread.start()
+
+        # Wait for all threads to finish
+        try:
+            for thread in threads:
+                thread.join()
+        except KeyboardInterrupt:
+            logging.info("Received keyboard interrupt. Shutting down gracefully...")
+            # Add any cleanup code here if needed
+        except Exception as e:
+            logging.error(f"Error in main thread: {e}", exc_info=True)
+        finally:
+            # Save final trade report
+            try:
+                tradereport.to_csv('trader_report_live.csv', index=False)
+                logging.info("Trade report saved successfully")
+            except Exception as e:
+                logging.error(f"Failed to save trade report: {e}")
+            
+            logging.info("Trading bot shutdown complete")
+            
+    except Exception as e:
+        logging.critical(f"Fatal error in main execution: {e}", exc_info=True)
+        sys.exit(1)    
