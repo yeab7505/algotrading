@@ -121,11 +121,6 @@ opt_einsum==3.4.0
 overrides==7.7.0
 packaging==24.1
 pandas==2.2.2
-pandas
-numpy
-matplotlib
-
-pandocfilters==1.5.1
 pandas-ta==0.3.14b
 parso==0.8.4
 peewee==3.17.8
@@ -151,8 +146,6 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 python-json-logger==2.0.7
 pytz==2024.1
-pywin32==306
-pywinpty==2.0.13
 PyYAML==6.0.1
 pyzmq==26.2.0
 referencing==0.35.1
@@ -180,7 +173,7 @@ stack-data==0.6.3
 streamlit==1.41.0
 sympy==1.13.1
 ta==0.11.0
-ta-lib @ file:///C:/Users/yeabsira/Downloads/ta_lib-0.6.3-cp312-cp312-win_amd64.whl#sha256=fbf480e9e936ed983776c616f461f4d4511bb1d010424558db3f559aec10dcd4
+ta-lib
 tenacity==9.0.0
 terminado==0.18.1
 textblob==0.19.0
@@ -208,7 +201,6 @@ webencodings==0.5.1
 websocket-client==1.8.0
 websockets==14.1
 widgetsnbextension==4.0.13
-winloop==0.1.7
 xgboost==1.7.3
 xxhash==3.4.1
 xyzservices==2025.1.0
