@@ -1,1 +1,1 @@
-web: python "ichimoku live.py"
+web: python3 "ichimoku live.py"
