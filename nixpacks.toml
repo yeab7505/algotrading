@@ -1,13 +1,18 @@
 [phases.setup]
-provider = "python"
-aptPkgs = [
-    "build-essential",
-    "libta-lib0",
-    "libta-lib-dev"
+cmds = [
+    "apt-get update",
+    "apt-get install -y --no-install-recommends build-essential wget pkg-config cmake"
 ]
 
 [phases.install]
-cmd = "pip install -r requirements.txt"
+cmds = [
+    "wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && tar -xzf ta-lib-0.4.0-src.tar.gz",
+    "cd ta-lib/ && ./configure && make && make install && cd .. && rm -rf ta-lib*",
+    "ldconfig",
+    "pip install --no-cache-dir numpy",
+    "pip install --no-cache-dir ta-lib",
+    "pip install --no-cache-dir -r requirements.txt"
+]
 
 [start]
-cmd = "python ichimoku\\ live.py"
+cmd = "python 'ichimoku live.py'"
