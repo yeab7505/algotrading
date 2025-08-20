@@ -10,7 +10,7 @@ import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from tools import measure
+
 from binance import ThreadedWebsocketManager
 from dotenv import load_dotenv
 from decimal import Decimal
