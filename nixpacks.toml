@@ -17,7 +17,7 @@ cmds = [
 ]
 
 [start]
-cmd = "/opt/venv/bin/python 'ichimoku live.py'"
+cmd = "/opt/venv/bin/python start.py"
 stopSignal = "SIGINT"
 
 

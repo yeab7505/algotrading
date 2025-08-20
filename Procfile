@@ -1,1 +1,1 @@
-web: python3 "ichimoku live.py"
+worker: /opt/venv/bin/python start.py
