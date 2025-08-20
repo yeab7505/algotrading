@@ -3,8 +3,13 @@ import sys
 
 
 def main() -> None:
+	# Ensure project root is importable (so `tools.py` and others can be found)
+	project_root = os.path.dirname(__file__)
+	if project_root not in sys.path:
+		sys.path.insert(0, project_root)
+
 	# Resolve the path to the target script with a space in the filename
-	script_path = os.path.join(os.path.dirname(__file__), "ichimoku live.py")
+	script_path = os.path.join(project_root, "ichimoku live.py")
 	if not os.path.exists(script_path):
 		sys.stderr.write(f"Start error: script not found at {script_path}\n")
 		sys.exit(1)
