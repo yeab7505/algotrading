@@ -15,6 +15,7 @@ from binance import ThreadedWebsocketManager
 from dotenv import load_dotenv
 from decimal import Decimal
 
+
 # Add scikit-learn imports
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.decomposition import PCA
@@ -24,8 +25,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import silhouette_score
 
 
-#these will be used to make asset specifice decsion on tp and sl multi]plier
-multiplier_set={'ETHUSDT':[1,3],'BTCUSDT':[1,3],'SOLUSDT':[1,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[1,3.5],'TRXUSDT':[3.5,3],'LTCUSDT':[1,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[1,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[1.5,3.5],'HBARUSDT':[1,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[1,3.5],'1000BONKUSDT':[1,3.5],'GALAUSDT':[1,3.5],'FETUSDT':[1,3.5],"GRTUSDT":[1,3.5],'1000SHIBUSDT':[1,3.5]}
+#these will be used to make asset specifice decsion on tp and sl multiplier
+multiplier_set={'ETHUSDT':[1,3],'BTCUSDT':[1,3],'SOLUSDT':[1,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[1,3.5],'TRXUSDT':[3.5,3],'LTCUSDT':[1,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[1,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[1.5,3.5],'HBARUSDT':[1,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[1,3.5],'1000BONKUSDT':[1,3.5],'GALAUSDT':[1,3.5],'FETUSDT':[1,3.5],"GRTUSDT":[1,3.5],'1000SHIBUSDT':[1,3.5],'DOTUSDT':[2,3.5],'LINKUSDT':[1.5,3.5],'AVAXUSDT':[1.5,3.5],'SUIUSDT':[3,3.5]}
 
 # --- Configuration ---
 API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
@@ -47,7 +48,7 @@ SP_MULTIPLIER = 3.5
 LEVERAGE = 1
 TC = 0.0005
 
-ASSETS = ['ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'LTCUSDT','SOLUSDT',"TONUSDT",'DOGEUSDT','TRXUSDT','1000SHIBUSDT','GUNUSDT','TUTUSDT','ADAUSDT','XLMUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','GALAUSDT','FETUSDT','GRTUSDT']
+ASSETS = ['ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'LTCUSDT','SOLUSDT',"TONUSDT",'DOGEUSDT','TRXUSDT','1000SHIBUSDT','GUNUSDT','TUTUSDT','ADAUSDT','XLMUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','GALAUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','AVAXUSDT','SUIUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 MAX_CONCURRENT_TRADES = 1  # Set this to the desired number of concurrent trades
 active_trades = []
@@ -76,6 +77,35 @@ def interval_to_milliseconds(interval):
             pass
     logging.error(f"Interval format {interval} not fully supported for ms conversion.")
     return None
+@lru_cache(maxsize=1)  # Cache last result
+def BTC_trend_identification(client):
+    """Identify BTC trend using cached data to reduce API calls"""
+    try:
+        # Get the last 2 hours of data (8 15-min candles)
+        now = datetime.now()
+        before = now - timedelta(hours=12)
+        
+        klines = client.futures_klines(
+            symbol='BTCUSDT',
+            interval=Client.KLINE_INTERVAL_15MINUTE,
+            limit=48
+        )
+        
+        if not klines:
+            return None
+            
+        first_close = float(klines[0][4])  # Close price of first candle
+        last_close = float(klines[-1][4])  # Close price of last candle
+        
+        return 'up' if last_close > first_close else 'down'
+    except Exception as e:
+        logging.error(f"Error in BTC trend identification: {e}")
+        return None
+
+# Global signal pool and lock for best trade selection
+signal_pool = []
+signal_pool_lock = threading.Lock()
+trade_in_progress = threading.Event()
 
 
 def print_trading_status():
@@ -186,6 +216,10 @@ class ForwardIchimokuTrader:
             except Exception as e:
                 if "No need to change position side" not in str(e):
                     raise
+            
+            # Clean any existing orders during initialization
+            self._cleaning_existing_order()
+            
             self.logger.info("Binance Futures client initialized and connection tested.")
         except Exception as e:
             self.logger.error(f"Failed to initialize Binance Futures client: {e}", exc_info=True)
@@ -490,6 +524,28 @@ class ForwardIchimokuTrader:
             self.logger.error(f"Error fetching/appending latest candle: {e}", exc_info=True)
             return False
 
+    def _calculate_future_kumo(self, df: pd.DataFrame) -> tuple[float, float]:
+        """Calculate future Kumo (cloud) values for the period 26 bars ahead."""
+        try:
+            # Get the current conversion and base lines
+            current_conversion = df['conversion line'].iloc[-1]
+            current_base = df['base line'].iloc[-1]
+            
+            # Calculate future Senkou Span A (26 periods ahead)
+            # Future Span A = (Conversion Line + Base Line) / 2 shifted 26 periods forward
+            future_span_a = (current_conversion + current_base) / 2
+            
+            # Calculate future Senkou Span B (26 periods ahead)
+            # Future Span B = (52-period high + 52-period low) / 2 shifted 26 periods forward
+            period_52_high = self.df['High'].rolling(window=52).max().iloc[-1]
+            period_52_low = self.df['Low'].rolling(window=52).min().iloc[-1]
+            future_span_b = (period_52_high + period_52_low) / 2
+            
+            return future_span_a, future_span_b
+        except Exception as e:
+            self.logger.error(f"Error calculating future Kumo: {e}")
+            return None, None
+
     def _calculate_indicators(self) -> bool:
         self.logger.debug(f"Calculating indicators for {len(self.df)} rows...")
         min_data_needed = self.required_lookback
@@ -508,6 +564,12 @@ class ForwardIchimokuTrader:
                 'ICS_26': 'lagging Span'
             })
             temp_df_ichi.index = self.df.index[-len(temp_df_ichi):]
+            
+            # Calculate future Kumo values
+            future_span_a, future_span_b = self._calculate_future_kumo(temp_df_ichi)
+            if future_span_a is not None and future_span_b is not None:
+                temp_df_ichi['future_span_a'] = future_span_a
+                temp_df_ichi['future_span_b'] = future_span_b
 
             if len(self.df) >= 15:
                 self.df['atr'] = ta.atr(self.df['High'],self.df['Low'],self.df['Close'], length=14)
@@ -613,24 +675,41 @@ class ForwardIchimokuTrader:
                     pass
         
 
+        # Get future Kumo values
+        future_span_a = last.get('future_span_a', None)
+        future_span_b = last.get('future_span_b', None)
+        
+        trend = BTC_trend_identification(self.client)
+
+        # Check if future Kumo is bullish or bearish
+        future_kumo_bullish = (future_span_a is not None and future_span_b is not None and future_span_a > future_span_b)
+        future_kumo_bearish = (future_span_a is not None and future_span_b is not None and future_span_a < future_span_b)
+
         buy_signal = (
             (current_close > close_t_minus_26)
             and (conversion_line > base_line)
-            and (leading_span_A > leading_span_B)
+            
             and (current_close > leading_Span_A_shifted)
+            and future_kumo_bullish  # Add future Kumo check
             and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
+            and (trend == 'up')
         )
         sell_signal = (
             (current_close < close_t_minus_26) 
             and (conversion_line < base_line) 
-            and (leading_span_B > leading_span_A) 
-            and (current_close < leading_Span_A_shifted)  
-            and (not(pd.isna(psar_short)))  # Only checks if PSAR exists, not its value
+            
+            and (current_close < leading_Span_A_shifted)
+            and future_kumo_bearish  # Add future Kumo check
+            and (not(pd.isna(psar_short))
+            and (trend =='down'))  # Only checks if PSAR exists, not its value
         )
 
 
         self.logger.debug(f"15min. Signals @ {last_index_name}: Buy={buy_signal}, Sell={sell_signal}")
-        self.logger.debug(f"Signal components - Close: {current_close:.4f}, T-26: {close_t_minus_26:.4f}, Conv: {conversion_line:.4f}, Base: {base_line:.4f}, LS_A: {leading_span_A:.4f}, LS_B: {leading_span_B:.4f}, PSAR_L: {psar_long:.4f}, PSAR_S: {psar_short:.4f}")
+        self.logger.debug(f"Signal components - Close: {current_close:.4f}, T-26: {close_t_minus_26:.4f}, Conv: {conversion_line:.4f}, Base: {base_line:.4f}")
+        self.logger.debug(f"Current Kumo - Span A: {leading_span_A:.4f}, Span B: {leading_span_B:.4f}")
+        self.logger.debug(f"Future Kumo - Span A: {str(future_span_a) if future_span_a is not None else 'None'}, Span B: {str(future_span_b) if future_span_b is not None else 'None'}")
+        self.logger.debug(f"PSAR - Long: {str(psar_long) if psar_long is not None else 'None'}, Short: {str(psar_short) if psar_short is not None else 'None'}")
         return buy_signal, sell_signal
     
     def _update_sl(self, new_sl_price):
@@ -987,48 +1066,16 @@ class ForwardIchimokuTrader:
 
         self.logger.info(f"New position entered | OrderID: {self.order_id}")
 
-    def handle_socket_message(self,msg):
-        if msg['e'] == 'ORDER_TRADE_UPDATE':
-            order = msg['o']
-            order_type = order['ot']
-            status = order['X']
-            stop_price = order.get('sp')
-
-            if status == 'FILLED':
-                if order_type == 'STOP_MARKET':
-                    self._reset_position_state()
-                elif order_type == 'TAKE_PROFIT_MARKET':
-                    self._reset_position_state()
-                else:
-                    print(f"Other order filled: {order_type} at {order.get('ap')}")
-
+    
     def _reset_position_state(self):
-        self.logger.info(f"Resetting position state for {self.symbol}. Attempting to cancel any open orders.")
+        """Reset position state and clean up orders/positions"""
+        self.logger.info(f"Resetting position state for {self.symbol}")
         
-        # First try to cancel all open orders
-        try:
-            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
-            for order in open_orders:
-                try:
-                    self.client.futures_cancel_order(
-                        symbol=self.symbol,
-                        orderId=order['orderId']
-                    )
-                    self.logger.info(f"Cancelled order {order['orderId']} for {self.symbol}")
-                except Exception as e:
-                    self.logger.error(f"Failed to cancel order {order['orderId']}: {e}")
-                    # Don't return here, continue trying to cancel other orders
-                    continue
-            
-            if open_orders:  # If we had any orders to cancel, wait a moment
-                time.sleep(0.5)
-        except Exception as e:
-            self.logger.error(f"Error checking open orders: {e}")
-            # Don't return here, continue with state reset
+        # Clean existing orders
+        self._cleaning_existing_order()
         
-        # Always reset state variables, even if order cancellation failed
+        # Close any open position
         try:
-            # Close any open position
             position = self.client.futures_position_information(symbol=self.symbol)
             if position and float(position[0]['positionAmt']) != 0:
                 self.client.futures_create_order(
@@ -1042,7 +1089,7 @@ class ForwardIchimokuTrader:
         except Exception as e:
             self.logger.error(f"Error closing position: {e}")
 
-        # Always reset these variables regardless of any errors above
+        # Reset state variables
         self.position = 0
         self.entry_price = 0.0
         self.tp_level = None
@@ -1053,6 +1100,7 @@ class ForwardIchimokuTrader:
         self.orderid = None
         self.tp_orderid = None
 
+        # Remove from active trades
         with active_trades_lock:
             if self in active_trades:
                 active_trades.remove(self)
