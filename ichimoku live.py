@@ -682,12 +682,12 @@ class ForwardIchimokuTrader:
         trend = BTC_trend_identification(self.client)
 
         # Check if future Kumo is bullish or bearish
-        future_kumo_bullish = (future_span_a is not None and future_span_b is not None and future_span_a > future_span_b)
-        future_kumo_bearish = (future_span_a is not None and future_span_b is not None and future_span_a < future_span_b)
+        future_kumo_bullish = (future_span_a is not None and future_span_b is not None and future_span_a >= future_span_b)
+        future_kumo_bearish = (future_span_a is not None and future_span_b is not None and future_span_a <= future_span_b)
 
         buy_signal = (
             (current_close > close_t_minus_26)
-            and (conversion_line > base_line)
+            and (conversion_line >= base_line)
             
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
@@ -696,7 +696,7 @@ class ForwardIchimokuTrader:
         )
         sell_signal = (
             (current_close < close_t_minus_26) 
-            and (conversion_line < base_line) 
+            and (conversion_line <= base_line) 
             
             and (current_close < leading_Span_A_shifted)
             and future_kumo_bearish  # Add future Kumo check
