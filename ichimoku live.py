@@ -38,7 +38,7 @@ if not API_KEY or not API_SECRET:
 orders_lock = threading.Lock()
 orders = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price', 'choppy'])
 
-tradereport = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price', 'exit_price', 'choppy'])
+tradereport = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price', 'exit_price', 'choppy', 'profit'])
 
 # Trading parameters
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE
@@ -139,6 +139,33 @@ def print_trading_status():
     else:
         print("No completed trades".center(100))
     print("="*100)
+    
+    # Add profit summary section
+    if len(tradereport) > 0 and 'profit' in tradereport.columns:
+        print("\n" + "="*100)
+        print("PROFIT SUMMARY:".center(100))
+        print("="*100)
+        
+        # Calculate profit statistics
+        total_profit = tradereport['profit'].sum()
+        winning_trades = len(tradereport[tradereport['profit'] > 0])
+        losing_trades = len(tradereport[tradereport['profit'] < 0])
+        total_trades = len(tradereport)
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        print(f"Total Profit/Loss: {total_profit:.4f} USDT".center(100))
+        print(f"Winning Trades: {winning_trades}/{total_trades} ({win_rate:.1f}%)".center(100))
+        print(f"Losing Trades: {losing_trades}/{total_trades}".center(100))
+        
+        if winning_trades > 0:
+            avg_win = tradereport[tradereport['profit'] > 0]['profit'].mean()
+            print(f"Average Win: {avg_win:.4f} USDT".center(100))
+        
+        if losing_trades > 0:
+            avg_loss = tradereport[tradereport['profit'] < 0]['profit'].mean()
+            print(f"Average Loss: {avg_loss:.4f} USDT".center(100))
+        
+        print("="*100)
     
     # Add extra newlines after printing
     print("\n\n")
@@ -687,7 +714,7 @@ class ForwardIchimokuTrader:
 
         buy_signal = (
             (current_close > close_t_minus_26)
-            and (conversion_line >= base_line)
+            and (conversion_line > base_line)
             
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
@@ -1074,6 +1101,51 @@ class ForwardIchimokuTrader:
         # Clean existing orders
         self._cleaning_existing_order()
         
+        # Get orders for the current symbol
+        symbol_orders = client.futures_get_all_orders(symbol=self.symbol)
+        
+        # Check for TP/SL hit orders and add to tradereport
+        for order in symbol_orders:
+            if order['status'] == 'FILLED':
+                if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
+                    # Create trade report entry for TP/SL hit
+                    exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
+                    
+                    # Calculate profit/loss
+                    if self.position_size > 0:
+                        if order['side'] == 'SELL':  # Long position closed
+                            profit = (exit_price - self.entry_price) * self.position_size
+                        else:  # Short position closed
+                            profit = (self.entry_price - exit_price) * self.position_size
+                    else:
+                        # Fallback: try to get position size from the order
+                        order_qty = float(order['executedQty']) if 'executedQty' in order else 0
+                        if order_qty > 0:
+                            if order['side'] == 'SELL':  # Long position closed
+                                profit = (exit_price - self.entry_price) * order_qty
+                            else:  # Short position closed
+                                profit = (self.entry_price - exit_price) * order_qty
+                        else:
+                            profit = 0.0  # Cannot calculate profit without position size
+                    
+                    trade_data = {
+                        'symbol': self.symbol,
+                        'side': 'BUY' if order['side'] == 'SELL' else 'SELL',  # Opposite of order side
+                        'entry_price': self.entry_price,
+                        'tp_price': self.tp_level,
+                        'sl_price': self.sl_level,
+                        'exit_price': exit_price,
+                        'choppy': 'N/A',  # Not applicable for TP/SL hits
+                        'profit': round(profit, 4)
+                    }
+                    
+                    # Add to tradereport
+                    global tradereport
+                    with orders_lock:
+                        tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
+                    
+                    self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}")
+                    
         # Close any open position
         try:
             position = self.client.futures_position_information(symbol=self.symbol)
