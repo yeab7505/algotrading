@@ -86,7 +86,7 @@ def BTC_trend_identification(client):
         before = now - timedelta(hours=12)
         
         klines = client.futures_klines(
-            symbol='BTCUSDT',
+            symbol='ETHUSDT',
             interval=Client.KLINE_INTERVAL_15MINUTE,
             limit=48
         )
@@ -718,8 +718,9 @@ class ForwardIchimokuTrader:
             
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
-            and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
-            and (trend == 'up')
+            and (not(pd.isna(psar_long)))
+            and (trend=='up')# Only checks if PSAR exists, not its value
+            
         )
         sell_signal = (
             (current_close < close_t_minus_26) 
@@ -728,7 +729,7 @@ class ForwardIchimokuTrader:
             and (current_close < leading_Span_A_shifted)
             and future_kumo_bearish  # Add future Kumo check
             and (not(pd.isna(psar_short))
-            and (trend =='down'))  # Only checks if PSAR exists, not its value
+             and (trend=='down')# Only checks if PSAR exists, not its value
         )
 
 
@@ -878,11 +879,11 @@ class ForwardIchimokuTrader:
         self.position = 1 if float(active_position['positionAmt']) > 0 else -1
 
         if self.position == 1:  # Long position
-            if (pd.isna(psar_long) and 
-                current_close < close_t_minus_26
-                and (conversion_line < base_line)
-                and (current_close < leading_Span_A_shifted)
-                and not future_kumo_bullish):
+            if not(not pd.isna(psar_long) and 
+                current_close > close_t_minus_26
+                and (conversion_line > base_line)
+                and (current_close > leading_Span_A_shifted)
+                and future_kumo_bullish):
                 
                 self.logger.info(f"Accidental exit conditions met for long position in {self.symbol}. Canceling orders and resetting.")
                 open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
@@ -901,11 +902,11 @@ class ForwardIchimokuTrader:
                 self._reset_position_state()
                 
         elif self.position == -1:  # Short position
-            if (pd.isna(psar_short) and 
-                current_close > close_t_minus_26
-                and (conversion_line > base_line)
-                and (current_close > leading_Span_A_shifted)
-                and not future_kumo_bearish):  # Fixed: was checking bullish instead of bearish
+            if not(not pd.isna(psar_short) and 
+                current_close < close_t_minus_26
+                and (conversion_line < base_line)
+                and (current_close < leading_Span_A_shifted)
+                and future_kumo_bearish):  # Fixed: was checking bullish instead of bearish
                 
                 self.logger.info(f"Accidental exit conditions met for short position in {self.symbol}. Canceling orders and resetting.")
                 open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
