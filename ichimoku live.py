@@ -729,7 +729,7 @@ class ForwardIchimokuTrader:
             and (current_close < leading_Span_A_shifted)
             and future_kumo_bearish  # Add future Kumo check
             and (not(pd.isna(psar_short))
-             and (trend=='down')# Only checks if PSAR exists, not its value
+             and (trend=='down'))# Only checks if PSAR exists, not its value
         )
 
 
