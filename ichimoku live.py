@@ -951,9 +951,9 @@ class ForwardIchimokuTrader:
 
             trade_capital = (usdt_balance / MAX_CONCURRENT_TRADES)
             if leverage_to_set==1:
-                margin_to_use = trade_capital * 0.9
+                margin_to_use = trade_capital * 0.95
             else:
-                margin_to_use = trade_capital * 0.90
+                margin_to_use = trade_capital * 0.95
             self.logger.info(f"Capital per trade: {trade_capital:.2f} USDT. Margin to use: {margin_to_use:.2f} USDT")
             
             # Calculate the notional value of the position using the correct leverage
