@@ -24,9 +24,10 @@ from sklearn.ensemble import IsolationForest
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import silhouette_score
 
+multiplier_set={'ETHUSDT':[3.5,3],'BTCUSDT':[2,3],'SOLUSDT':[2,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[2,3.5],'TRXUSDT':[2,3],'LTCUSDT':[1.5,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[2.5,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[3.5,3.5],'HBARUSDT':[1.5,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[2,3.5],'1000BONKUSDT':[1.5,3],'GALAUSDT':[2.5,3.5],'FETUSDT':[0.5,3.5],"GRTUSDT":[3.5,3.5],'1000SHIBUSDT':[2.5,3.5],'DOTUSDT':[1,3.5],'LINKUSDT':[2.5,3],'AVAXUSDT':[1.5,3.5],'SUIUSDT':[1,3.5]}
 
+adx_limit= {'ETHUSDT':80,'BTCUSDT':40,'SOLUSDT':30,'XRPUSDT':40,"TONUSDT":30,'DOGEUSDT':40,'TRXUSDT':70,'LTCUSDT':50,'ADAUSDT':50,'XLMUSDT':60,'VETUSDT':40,'HBARUSDT':40,'SANDUSDT':50,'1000PEPEUSDT':50,'1000BONKUSDT':70,'GALAUSDT':60,'FETUSDT':50,'GRTUSDT':60,'1000SHIBUSDT':40,'DOTUSDT':70,'LINKUSDT':50,'AVAXUSDT':40,'SUIUSDT':80}
 #these will be used to make asset specifice decsion on tp and sl multiplier
-multiplier_set={'ETHUSDT':[1,3],'BTCUSDT':[1,3],'SOLUSDT':[1,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[1,3.5],'TRXUSDT':[3.5,3],'LTCUSDT':[1,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[1,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[1.5,3.5],'HBARUSDT':[1,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[1,3.5],'1000BONKUSDT':[1,3.5],'GALAUSDT':[1,3.5],'FETUSDT':[1,3.5],"GRTUSDT":[1,3.5],'1000SHIBUSDT':[1,3.5],'DOTUSDT':[2,3.5],'LINKUSDT':[1.5,3.5],'AVAXUSDT':[1.5,3.5],'SUIUSDT':[3,3.5]}
 
 # --- Configuration ---
 API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
@@ -48,7 +49,7 @@ SP_MULTIPLIER = 3.5
 LEVERAGE = 1
 TC = 0.0005
 
-ASSETS = ['ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'LTCUSDT','SOLUSDT',"TONUSDT",'DOGEUSDT','TRXUSDT','1000SHIBUSDT','ADAUSDT','XLMUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','GALAUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','AVAXUSDT','SUIUSDT']
+ASSETS = ['DOGEUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','SUIUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 MAX_CONCURRENT_TRADES = 1  # Set this to the desired number of concurrent trades
 active_trades = []
@@ -601,6 +602,8 @@ class ForwardIchimokuTrader:
             if len(self.df) >= 15:
                 self.df['atr'] = ta.atr(self.df['High'],self.df['Low'],self.df['Close'], length=14)
                 self.df['choppy'] = ta.chop(self.df['High'],self.df['Low'],self.df['Close'])
+                adx=ta.adx(self.df['High'],self.df['Low'],self.df['Close'])['ADX_14']
+                self.df['ADX_14'] = adx['ADX_14']
                 psar_data = ta.psar(self.df['High'],self.df['Low'],self.df['Close'])
 
                 psar_cols_to_drop = ['PSAR_Long', 'PSAR_Short', 'PSAR_Reversal', 'PSARaf_0.02_0.2', 
@@ -672,6 +675,7 @@ class ForwardIchimokuTrader:
         leading_span_B = last['leading Span B']
         choppy = last['choppy']
         leading_Span_A_shifted = self.df['leading Span A'].iloc[-26]
+        adx= last['ADX_14']
 
         
 
@@ -718,8 +722,9 @@ class ForwardIchimokuTrader:
             
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
-            and (not(pd.isna(psar_long)))
-            and (trend=='up')# Only checks if PSAR exists, not its value
+            and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
+            and (trend == 'up')
+            and adx < adx_limit[self.symbol]
             
         )
         sell_signal = (
@@ -728,8 +733,9 @@ class ForwardIchimokuTrader:
             
             and (current_close < leading_Span_A_shifted)
             and future_kumo_bearish  # Add future Kumo check
-            and (not(pd.isna(psar_short))
-             and (trend=='down'))# Only checks if PSAR exists, not its value
+            and (not(pd.isna(psar_short)))
+            and (trend =='down')  # Only checks if PSAR exists, not its value
+            and adx < adx_limit[self.symbol]
         )
 
 
@@ -778,6 +784,8 @@ class ForwardIchimokuTrader:
             self.logger.error(f"FAILED to update SL order: {e}", exc_info=True)
             self.orderid = None
 
+    
+
 
     def manage_position(self) -> None:
 
@@ -816,7 +824,6 @@ class ForwardIchimokuTrader:
             self.position = 1 if float(active_position['positionAmt']) > 0 else -1
             self.entry_price = float(active_position['entryPrice'])
             self.position_size = abs(float(active_position['positionAmt']))
-
 
             # Now, manage the trailing stop.
             last_row = self.df.iloc[-1]
@@ -951,9 +958,9 @@ class ForwardIchimokuTrader:
 
             trade_capital = (usdt_balance / MAX_CONCURRENT_TRADES)
             if leverage_to_set==1:
-                margin_to_use = trade_capital * 0.95
+                margin_to_use = trade_capital * 0.9
             else:
-                margin_to_use = trade_capital * 0.95
+                margin_to_use = trade_capital * 0.90
             self.logger.info(f"Capital per trade: {trade_capital:.2f} USDT. Margin to use: {margin_to_use:.2f} USDT")
             
             # Calculate the notional value of the position using the correct leverage
