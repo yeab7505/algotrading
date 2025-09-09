@@ -602,7 +602,7 @@ class ForwardIchimokuTrader:
             if len(self.df) >= 15:
                 self.df['atr'] = ta.atr(self.df['High'],self.df['Low'],self.df['Close'], length=14)
                 self.df['choppy'] = ta.chop(self.df['High'],self.df['Low'],self.df['Close'])
-                adx=ta.adx(self.df['High'],self.df['Low'],self.df['Close'])['ADX_14']
+                adx=ta.adx(self.df['High'],self.df['Low'],self.df['Close'])
                 self.df['ADX_14'] = adx['ADX_14']
                 psar_data = ta.psar(self.df['High'],self.df['Low'],self.df['Close'])
 
