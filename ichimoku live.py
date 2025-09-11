@@ -30,8 +30,10 @@ adx_limit= {'ETHUSDT':80,'BTCUSDT':40,'SOLUSDT':30,'XRPUSDT':40,"TONUSDT":30,'DO
 #these will be used to make asset specifice decsion on tp and sl multiplier
 
 # --- Configuration ---
+load_dotenv()  # Load environment variables from .env file
 API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
 API_SECRET = "bz1m4UlthzklqXlWoqAqXZiJE35jjT0g5uJ5cQ43vwDNnsIpPYS5OqevfBVz84iK"
+
 
 if not API_KEY or not API_SECRET:
     raise ValueError("Binance API credentials not found in environment variables. Please set BINANCE_API_KEY and BINANCE_API_SECRET.")
@@ -46,14 +48,15 @@ INTERVAL = Client.KLINE_INTERVAL_15MINUTE
 LOOKBACK_PERIODS = 100
 TP_MULTIPLIER = 1
 SP_MULTIPLIER = 3.5
-LEVERAGE = 2
+LEVERAGE = 1
 TC = 0.0005
 
 ASSETS = ['DOGEUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','SUIUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
-MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
+MAX_CONCURRENT_TRADES = 1  # Set this to the desired number of concurrent trades
 active_trades = []
 active_trades_lock = threading.Lock()
+ALLOCATION_MODE = 'dynamic_remaining'  # Options: 'fixed_per_slot', 'dynamic_remaining', 'full_available'
 
 # Configure logging
 logging.basicConfig(
@@ -931,7 +934,7 @@ class ForwardIchimokuTrader:
             self.logger.info(f"Step 11: Setting leverage...")
             try:
                 choppy_value = self.df['choppy'].iloc[-1] if 'choppy' in self.df.columns else 50
-                leverage_to_set = self.leverage * 1 if choppy_value < 38 else self.leverage
+                leverage_to_set = self.leverage * 2 if choppy_value < 25 else self.leverage
                 self.client.futures_change_leverage(symbol=self.symbol, leverage=leverage_to_set)
                 self.logger.info(f"Set leverage to {leverage_to_set}x for {self.symbol}")
             except Exception as e:
@@ -955,12 +958,22 @@ class ForwardIchimokuTrader:
                 return
                     
             self.logger.info(f"Step 14: Calculating position size...")
+            # Determine trade capital based on allocation mode
+            active_count_before = max(len(active_trades) - 1, 0)
+            if ALLOCATION_MODE == 'fixed_per_slot':
+                denominator = max(int(MAX_CONCURRENT_TRADES), 1)
+            elif ALLOCATION_MODE == 'dynamic_remaining':
+                # Divide by remaining slots given currently active trades BEFORE this entry
+                denominator = max(int(MAX_CONCURRENT_TRADES) - active_count_before, 1)
+            else:  # 'full_available'
+                denominator = 1
 
-            trade_capital = (usdt_balance / MAX_CONCURRENT_TRADES)
+            trade_capital = usdt_balance / denominator
+
             if leverage_to_set==1:
-                margin_to_use = trade_capital * 0.9
+                margin_to_use = trade_capital * 0.95
             else:
-                margin_to_use = trade_capital * 0.90
+                margin_to_use = trade_capital * 0.95
             self.logger.info(f"Capital per trade: {trade_capital:.2f} USDT. Margin to use: {margin_to_use:.2f} USDT")
             
             # Calculate the notional value of the position using the correct leverage
@@ -1113,7 +1126,7 @@ class ForwardIchimokuTrader:
         self._cleaning_existing_order()
         
         # Get orders for the current symbol
-        symbol_orders = client.futures_get_all_orders(symbol=self.symbol)
+        symbol_orders = self.client.futures_get_all_orders(symbol=self.symbol)
         
         # Check for TP/SL hit orders and add to tradereport
         for order in symbol_orders:
@@ -1154,10 +1167,15 @@ class ForwardIchimokuTrader:
                     global tradereport
                     with orders_lock:
                         tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
-                    
                     self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}")
+                    # Immediately display updated completed trades and persist
+                    try:
+                        print_trading_status()
+                    except Exception as e:
+                        self.logger.debug(f"Could not print trading status: {e}")
                     
-        # Close any open position
+                    
+        # Close any open position and log completion
         try:
             position = self.client.futures_position_information(symbol=self.symbol)
             if position and float(position[0]['positionAmt']) != 0:
@@ -1169,6 +1187,10 @@ class ForwardIchimokuTrader:
                     reduceOnly=True
                 )
                 self.logger.info(f"Closed open position for {self.symbol}")
+                try:
+                    print_trading_status()
+                except Exception as e:
+                    self.logger.debug(f"Could not print trading status after closure: {e}")
         except Exception as e:
             self.logger.error(f"Error closing position: {e}")
 
@@ -1294,9 +1316,23 @@ class ForwardIchimokuTrader:
 
             available_slots = 0
             with active_trades_lock:
-                # Remove any traders that are no longer in a position
-                active_trades[:] = [t for t in active_trades if t.position != 0]
-                
+                # Actively sync active_trades with exchange to avoid stale entries after SL/TP
+                still_active = []
+                for t in list(active_trades):
+                    try:
+                        pos = t.client.futures_position_information(symbol=t.symbol)
+                        if pos and float(pos[0]['positionAmt']) != 0:
+                            still_active.append(t)
+                        else:
+                            t.position = 0
+                            logging.info(f"Detected closed position for {t.symbol}. Removing from active trades.")
+                    except Exception as e:
+                        # On error, keep previous state to avoid accidental over-allocation
+                        logging.warning(f"Could not sync position for {t.symbol}: {e}")
+                        if t.position != 0:
+                            still_active.append(t)
+                active_trades[:] = still_active
+
                 available_slots = MAX_CONCURRENT_TRADES - len(active_trades)
                 logging.info(f"Signal pool size: {len(signal_pool)}, Available slots: {available_slots}, Active trades: {[t.symbol for t in active_trades]}")
             
