@@ -46,12 +46,12 @@ INTERVAL = Client.KLINE_INTERVAL_15MINUTE
 LOOKBACK_PERIODS = 100
 TP_MULTIPLIER = 1
 SP_MULTIPLIER = 3.5
-LEVERAGE = 1
+LEVERAGE = 2
 TC = 0.0005
 
 ASSETS = ['DOGEUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','SUIUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
-MAX_CONCURRENT_TRADES = 1  # Set this to the desired number of concurrent trades
+MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
 active_trades = []
 active_trades_lock = threading.Lock()
 
@@ -931,7 +931,7 @@ class ForwardIchimokuTrader:
             self.logger.info(f"Step 11: Setting leverage...")
             try:
                 choppy_value = self.df['choppy'].iloc[-1] if 'choppy' in self.df.columns else 50
-                leverage_to_set = self.leverage * 2 if choppy_value < 38 else self.leverage
+                leverage_to_set = self.leverage * 1 if choppy_value < 38 else self.leverage
                 self.client.futures_change_leverage(symbol=self.symbol, leverage=leverage_to_set)
                 self.logger.info(f"Set leverage to {leverage_to_set}x for {self.symbol}")
             except Exception as e:
