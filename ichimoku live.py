@@ -8,21 +8,13 @@ import threading
 from datetime import datetime, timedelta, UTC
 import sys
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 # from tools import measure  # Not used, removed to fix import error
-from binance import ThreadedWebsocketManager
 from dotenv import load_dotenv
 from decimal import Decimal
 
 
-# Add scikit-learn imports
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import silhouette_score
+ 
 
 multiplier_set={'ETHUSDT':[3.5,3],'BTCUSDT':[2,3],'SOLUSDT':[2,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[2,3.5],'TRXUSDT':[2,3],'LTCUSDT':[1.5,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[2.5,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[3.5,3.5],'HBARUSDT':[1.5,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[2,3.5],'1000BONKUSDT':[1.5,3],'GALAUSDT':[2.5,3.5],'FETUSDT':[0.5,3.5],"GRTUSDT":[3.5,3.5],'1000SHIBUSDT':[2.5,3.5],'DOTUSDT':[1,3.5],'LINKUSDT':[2.5,3],'AVAXUSDT':[1.5,3.5],'SUIUSDT':[1,3.5]}
 
@@ -111,6 +103,81 @@ signal_pool = []
 signal_pool_lock = threading.Lock()
 trade_in_progress = threading.Event()
 
+# Trading inhibition system
+trading_inhibited = False
+inhibition_start_time = None
+inhibition_trigger_trade_count = 0  # Track how many trades existed when inhibition was triggered
+INHIBITION_DURATION_MINUTES = 30
+
+
+def check_last_two_trades_and_manage_inhibition():
+    """Check if last 2 trades were losses and manage trading inhibition"""
+    global trading_inhibited, inhibition_start_time, inhibition_trigger_trade_count
+    
+    try:
+        # Check if we have at least 2 completed trades
+        if len(tradereport) < 2:
+            return True  # Allow trading if less than 2 trades
+        
+        # If currently inhibited, check if time has expired
+        if trading_inhibited:
+            if inhibition_start_time:
+                time_elapsed = datetime.now(UTC) - inhibition_start_time
+                if time_elapsed.total_seconds() >= INHIBITION_DURATION_MINUTES * 60:
+                    # Check if there are new trades since inhibition started
+                    current_trade_count = len(tradereport)
+                    if current_trade_count > inhibition_trigger_trade_count+2:
+                        # There are new trades, check if they are losses
+                        new_trades = tradereport.iloc[inhibition_trigger_trade_count:]
+                        if len(new_trades) >= 2:
+                            # Check if the last 2 new trades are losses
+                            last_two_new_trades = new_trades.tail(2)
+                            both_losses = all(trade['profit'] < 0 for _, trade in last_two_new_trades.iterrows())
+                            if both_losses:
+                                # Extend inhibition for another 30 minutes
+                                inhibition_start_time = datetime.now(UTC)
+                                inhibition_trigger_trade_count = current_trade_count
+                                logging.warning(f"Last 2 new trades were also losses. Extending inhibition for another {INHIBITION_DURATION_MINUTES} minutes.")
+                                logging.warning(f"New trades: {last_two_new_trades[['symbol', 'profit']].to_dict('records')}")
+                                return False
+                    
+                    # No new trades or new trades are not both losses, resume trading
+                    trading_inhibited = False
+                    inhibition_start_time = None
+                    inhibition_trigger_trade_count = 0
+                    logging.info("Trading inhibition period expired. Resuming normal trading.")
+                    return True
+                else:
+                    remaining_minutes = INHIBITION_DURATION_MINUTES - (time_elapsed.total_seconds() / 60)
+                    logging.debug(f"Trading still inhibited. {remaining_minutes:.1f} minutes remaining.")
+                    return False
+            else:
+                # Reset if start time is missing
+                trading_inhibited = False
+                inhibition_trigger_trade_count = 0
+                return True
+        
+        # Not currently inhibited, check if we should start inhibition
+        # Get the last 2 trades
+        last_two_trades = tradereport.tail(2)
+        
+        # Check if both were losses
+        both_losses = all(trade['profit'] < 0 for _, trade in last_two_trades.iterrows())
+        
+        if both_losses:
+            # Start inhibition period
+            trading_inhibited = True
+            inhibition_start_time = datetime.now(UTC)
+            inhibition_trigger_trade_count = len(tradereport)
+            logging.warning(f"Last 2 trades were losses. Inhibiting trading for {INHIBITION_DURATION_MINUTES} minutes.")
+            logging.warning(f"Last 2 trades: {last_two_trades[['symbol', 'profit']].to_dict('records')}")
+            return False
+        
+        return True  # Allow trading if not both losses
+        
+    except Exception as e:
+        logging.error(f"Error checking last two trades: {e}")
+        return True  # Allow trading on error
 
 def print_trading_status():
     """Print current orders and trade reports with formatting."""
@@ -170,6 +237,21 @@ def print_trading_status():
             print(f"Average Loss: {avg_loss:.4f} USDT".center(100))
         
         print("="*100)
+    
+    # Add trading inhibition status
+    print("\n" + "="*100)
+    print("TRADING STATUS:".center(100))
+    print("="*100)
+    if trading_inhibited:
+        if inhibition_start_time:
+            time_elapsed = datetime.now(UTC) - inhibition_start_time
+            remaining_minutes = INHIBITION_DURATION_MINUTES - (time_elapsed.total_seconds() / 60)
+            print(f"TRADING INHIBITED - {remaining_minutes:.1f} minutes remaining".center(100))
+        else:
+            print("TRADING INHIBITED - Time unknown".center(100))
+    else:
+        print("TRADING ACTIVE".center(100))
+    print("="*100)
     
     # Add extra newlines after printing
     print("\n\n")
@@ -267,6 +349,7 @@ class ForwardIchimokuTrader:
         self.position_size = 0.0  # Store the actual position size
         self.orderid = None  # Stop loss order ID
         self.tp_orderid = None  # Take profit order ID
+        self.processed_orders = set()  # Track processed orders to avoid duplicates
 
         self.ms_interval = interval_to_milliseconds(self.interval)
         if not self.ms_interval:
@@ -749,6 +832,75 @@ class ForwardIchimokuTrader:
         self.logger.debug(f"PSAR - Long: {str(psar_long) if psar_long is not None else 'None'}, Short: {str(psar_short) if psar_short is not None else 'None'}")
         return buy_signal, sell_signal
     
+    def _check_tp_sl_hits(self):
+        """Check for TP/SL hits and add them to trade report"""
+        try:
+            # Get orders for the current symbol
+            symbol_orders = self.client.futures_get_all_orders(symbol=self.symbol)
+            
+            # Check for TP/SL hit orders and add to tradereport
+            self.logger.debug(f"Checking {len(symbol_orders)} orders for {self.symbol} for TP/SL hits...")
+            for order in symbol_orders:
+                if order['status'] == 'FILLED':
+                    if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
+                        # Check if we've already processed this order
+                        order_id = order['orderId']
+                        if order_id in self.processed_orders:
+                            continue
+                        
+                        self.logger.info(f"Found TP/SL hit: {order['type']} order {order_id} for {self.symbol}")
+                        self.processed_orders.add(order_id)
+                        # Create trade report entry for TP/SL hit
+                        exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
+                        
+                        # Determine original position side based on order side
+                        # TP/SL orders have opposite side to original position
+                        original_position_side = 'SELL' if order['side'] == 'BUY' else 'BUY'
+                        
+                        # Calculate profit/loss
+                        if self.position_size > 0:
+                            if original_position_side == 'BUY':  # Long position closed
+                                profit = (exit_price - self.entry_price) * self.position_size
+                            else:  # Short position closed
+                                profit = (self.entry_price - exit_price) * self.position_size
+                        else:
+                            # Fallback: try to get position size from the order
+                            order_qty = float(order['executedQty']) if 'executedQty' in order else 0
+                            if order_qty > 0:
+                                if original_position_side == 'BUY':  # Long position closed
+                                    profit = (exit_price - self.entry_price) * order_qty
+                                else:  # Short position closed
+                                    profit = (self.entry_price - exit_price) * order_qty
+                            else:
+                                profit = 0.0  # Cannot calculate profit without position size
+                        
+                        trade_data = {
+                            'symbol': self.symbol,
+                            'side': original_position_side,  # Original position side
+                            'entry_price': self.entry_price,
+                            'tp_price': self.tp_level,
+                            'sl_price': self.sl_level,
+                            'exit_price': exit_price,
+                            'choppy': 'N/A',  # Not applicable for TP/SL hits
+                            'profit': round(profit, 4)
+                        }
+                        
+                        # Add to tradereport
+                        global tradereport
+                        with orders_lock:
+                            tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
+                        self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}, profit: {trade_data['profit']}")
+                        self.logger.info(f"Trade data added: {trade_data}")
+                        # Immediately display updated completed trades and persist
+                        try:
+                            print_trading_status()
+                            self.logger.info("Trading status printed successfully")
+                        except Exception as e:
+                            self.logger.error(f"Could not print trading status: {e}")
+                        
+        except Exception as e:
+            self.logger.error(f"Error checking TP/SL hits: {e}", exc_info=True)
+
     def _update_sl(self, new_sl_price):
         try:
             if not hasattr(self, '_price_precision') or self._price_precision is None:
@@ -793,6 +945,9 @@ class ForwardIchimokuTrader:
     def manage_position(self) -> None:
 
         try:
+            # Check for TP/SL hits first
+            self._check_tp_sl_hits()
+            
             # Always get the real-time position status from the exchange
             positions = self.client.futures_position_information()
             active_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
@@ -934,7 +1089,7 @@ class ForwardIchimokuTrader:
             self.logger.info(f"Step 11: Setting leverage...")
             try:
                 choppy_value = self.df['choppy'].iloc[-1] if 'choppy' in self.df.columns else 50
-                leverage_to_set = self.leverage * 2 if choppy_value < 25 else self.leverage
+                leverage_to_set = self.leverage * 2 if choppy_value < 38 else self.leverage
                 self.client.futures_change_leverage(symbol=self.symbol, leverage=leverage_to_set)
                 self.logger.info(f"Set leverage to {leverage_to_set}x for {self.symbol}")
             except Exception as e:
@@ -1092,6 +1247,7 @@ class ForwardIchimokuTrader:
             # Initialize tracking variables
             self.highest_price_since_entry = self.entry_price
             self.lowest_price_since_entry = self.entry_price
+            self.processed_orders.clear()  # Clear processed orders for new position
             
         except Exception as e:
             self.logger.error(f"Error in position entry for {self.symbol}: {e}", exc_info=True)
@@ -1129,15 +1285,21 @@ class ForwardIchimokuTrader:
         symbol_orders = self.client.futures_get_all_orders(symbol=self.symbol)
         
         # Check for TP/SL hit orders and add to tradereport
+        self.logger.info(f"Checking {len(symbol_orders)} orders for {self.symbol} for TP/SL hits...")
         for order in symbol_orders:
             if order['status'] == 'FILLED':
                 if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
+                    self.logger.info(f"Found TP/SL hit: {order['type']} order {order['orderId']} for {self.symbol}")
                     # Create trade report entry for TP/SL hit
                     exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
                     
+                    # Determine original position side based on order side
+                    # TP/SL orders have opposite side to original position
+                    original_position_side = 'SELL' if order['side'] == 'BUY' else 'BUY'
+                    
                     # Calculate profit/loss
                     if self.position_size > 0:
-                        if order['side'] == 'SELL':  # Long position closed
+                        if original_position_side == 'BUY':  # Long position closed
                             profit = (exit_price - self.entry_price) * self.position_size
                         else:  # Short position closed
                             profit = (self.entry_price - exit_price) * self.position_size
@@ -1145,7 +1307,7 @@ class ForwardIchimokuTrader:
                         # Fallback: try to get position size from the order
                         order_qty = float(order['executedQty']) if 'executedQty' in order else 0
                         if order_qty > 0:
-                            if order['side'] == 'SELL':  # Long position closed
+                            if original_position_side == 'BUY':  # Long position closed
                                 profit = (exit_price - self.entry_price) * order_qty
                             else:  # Short position closed
                                 profit = (self.entry_price - exit_price) * order_qty
@@ -1154,7 +1316,7 @@ class ForwardIchimokuTrader:
                     
                     trade_data = {
                         'symbol': self.symbol,
-                        'side': 'BUY' if order['side'] == 'SELL' else 'SELL',  # Opposite of order side
+                        'side': original_position_side,  # Original position side
                         'entry_price': self.entry_price,
                         'tp_price': self.tp_level,
                         'sl_price': self.sl_level,
@@ -1167,12 +1329,14 @@ class ForwardIchimokuTrader:
                     global tradereport
                     with orders_lock:
                         tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
-                    self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}")
+                    self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}, profit: {trade_data['profit']}")
+                    self.logger.info(f"Trade data added: {trade_data}")
                     # Immediately display updated completed trades and persist
                     try:
                         print_trading_status()
+                        self.logger.info("Trading status printed successfully")
                     except Exception as e:
-                        self.logger.debug(f"Could not print trading status: {e}")
+                        self.logger.error(f"Could not print trading status: {e}")
                     
                     
         # Close any open position and log completion
@@ -1204,6 +1368,7 @@ class ForwardIchimokuTrader:
         self.position_size = 0.0
         self.orderid = None
         self.tp_orderid = None
+        self.processed_orders.clear()
 
         # Remove from active trades
         with active_trades_lock:
@@ -1294,6 +1459,11 @@ class ForwardIchimokuTrader:
         tradereport.to_csv('trader_report.csv', index=False)
 
     def _submit_signal(self, direction, price, atr, choppy):
+        # Check if trading is inhibited
+        if not check_last_two_trades_and_manage_inhibition():
+            self.logger.info(f"Signal submission blocked for {self.symbol} due to trading inhibition (last 2 trades were losses)")
+            return
+        
         signal = {
             'symbol': self.symbol,
             'direction': direction,
@@ -1309,6 +1479,11 @@ class ForwardIchimokuTrader:
 
     @staticmethod
     def pick_and_execute_best_trade():
+        # Check if trading is inhibited before processing signals
+        if not check_last_two_trades_and_manage_inhibition():
+            logging.info("Trade execution blocked due to trading inhibition (last 2 trades were losses)")
+            return
+        
         signals_to_execute = []
         with signal_pool_lock:
             if not signal_pool:
