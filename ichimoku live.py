@@ -126,7 +126,7 @@ def check_last_two_trades_and_manage_inhibition():
                 if time_elapsed.total_seconds() >= INHIBITION_DURATION_MINUTES * 60:
                     # Check if there are new trades since inhibition started
                     current_trade_count = len(tradereport)
-                    if current_trade_count > inhibition_trigger_trade_count+2:
+                    if current_trade_count > inhibition_trigger_trade_count:
                         # There are new trades, check if they are losses
                         new_trades = tradereport.iloc[inhibition_trigger_trade_count:]
                         if len(new_trades) >= 2:
