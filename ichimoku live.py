@@ -40,12 +40,12 @@ INTERVAL = Client.KLINE_INTERVAL_15MINUTE
 LOOKBACK_PERIODS = 100
 TP_MULTIPLIER = 1
 SP_MULTIPLIER = 3.5
-LEVERAGE = 5
+LEVERAGE = 2
 TC = 0.0005
 
 ASSETS = ['DOGEUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','SUIUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
-MAX_CONCURRENT_TRADES = 3  # Set this to the desired number of concurrent trades
+MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
 active_trades = []
 active_trades_lock = threading.Lock()
 ALLOCATION_MODE = 'dynamic_remaining'  # Options: 'fixed_per_slot', 'dynamic_remaining', 'full_available'
