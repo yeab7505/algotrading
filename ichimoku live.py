@@ -186,7 +186,14 @@ def print_trading_status():
     
     # Print current trades
     print("="*100)
+    for balance in account_balance:
+        if balance['asset'] == 'USDT':
+            usdt_balance = float(balance['balance'])
+            break
+    print('USDT BALANCE:'.center(100))
     print(usdt_balance)
+    print('='*100)
+    
     print("CURRENT ACTIVE TRADES:".center(100))
     print("="*100)
     if len(orders) > 0:
