@@ -186,7 +186,7 @@ def print_trading_status():
     
     # Print current trades
     print("="*100)
-    print(ustd_balance)
+    print(usdt_balance)
     print("CURRENT ACTIVE TRADES:".center(100))
     print("="*100)
     if len(orders) > 0:
