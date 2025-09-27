@@ -425,7 +425,7 @@ def print_trading_status():
     print("="*100)
     print('BALANCE:'.center(100))
     print('='*100)
-    print(usdt_balance).center(100)      
+    print(usdt_balance)     
     print("="*100)
     print("CURRENT ACTIVE TRADES:".center(100))
     print("="*100)
