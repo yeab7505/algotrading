@@ -1894,7 +1894,7 @@ if __name__ == "__main__":
                     check_news_and_manage_inhibition()
                 except Exception as e:
                     logging.error(f"Error in news checker loop: {e}")
-                time.sleep(60)  # Check every minute
+                time.sleep(3600*6)  # Check every 6 hours
 
         news_thread = threading.Thread(target=news_checker_loop, daemon=True)
         news_thread.start()
