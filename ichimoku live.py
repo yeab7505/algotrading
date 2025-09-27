@@ -227,16 +227,7 @@ def is_high_impact_news(news_item):
         
         # High-impact keywords
         high_impact_keywords = [
-            'fed', 'federal reserve', 'interest rate', 'rate hike', 'rate cut',
-            'inflation', 'cpi', 'pce', 'employment', 'jobs report', 'nfp',
-            'sec', 'regulation', 'ban', 'legal', 'lawsuit', 'settlement',
-            'etf', 'approval', 'rejection', 'bitcoin etf', 'ethereum etf',
-            'halving', 'bitcoin halving', 'supply', 'burn', 'token burn',
-            'hack', 'exploit', 'security breach', 'vulnerability',
-            'partnership', 'merger', 'acquisition', 'major deal',
-            'upgrade', 'hard fork', 'soft fork', 'network upgrade',
-            'ceo', 'founder', 'leadership change', 'resignation',
-            'audit', 'compliance', 'investigation', 'fine', 'penalty'
+            'fed', 'federal reserve', 'interest rate', 'rate hike', 'rate cut', 'inflation', 'cpi', 'pce', 'employment', 'jobs report', 'nfp'
         ]
         
         # Check title for high-impact keywords
