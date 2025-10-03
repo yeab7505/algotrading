@@ -259,8 +259,12 @@ def print_trading_status():
     print("="*100)
     print('BALANCE:'.center(100))
     print('='*100)
-    balance = client.futures_account_balance()
-    print(balance) 
+    available_balance = client.futures_account_balance()
+    usdt_balance = 0
+    for balance in available_balance:
+        if balance['asset'] == 'USDT':
+            usdt_balance = float(balance['availableBalance'])  
+    print(f"Available balance: {usdt_balance} USDT".center(100)) 
     print("="*100)
     print("CURRENT ACTIVE TRADES:".center(100))
     print("="*100)
