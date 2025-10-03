@@ -41,8 +41,8 @@ class TelegramReporter:
 
     @staticmethod
     def from_env() -> Optional["TelegramReporter"]:
-        token = os.getenv("8238483052:AAHr4CQqHIcASPgEK6txHyKOI0Kb0_CTBgg")
-        chat_id = os.getenv("746595758")
+        token = "8238483052:AAHr4CQqHIcASPgEK6txHyKOI0Kb0_CTBgg"
+        chat_id = "746595758"
         if token and chat_id:
             return TelegramReporter(token, chat_id)
         return None
