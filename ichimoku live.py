@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from decimal import Decimal
 import requests
 import json
+from telegram_reporter import setup_telegram_logging_from_env, TelegramReporter
 
 
  
@@ -63,6 +64,68 @@ logging.basicConfig(
 )
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("binance").setLevel(logging.INFO)
+telegram_reporter = setup_telegram_logging_from_env()
+
+def create_binance_client_with_failover(api_key: str, api_secret: str) -> Client:
+    """Create a Binance Client with higher timeout and endpoint failover.
+
+    Works around connect timeouts to `api.binance.com` by retrying and attempting
+    alternative API hosts. It temporarily overrides the Client.API_URL class attr
+    during construction because the library pings on __init__.
+    """
+    requests_params = {'timeout': 30}
+    # First try default endpoint with longer timeout, a couple retries
+    last_exc = None
+    for _ in range(2):
+        try:
+            client = Client(api_key, api_secret, requests_params=requests_params)
+            client.futures_ping()
+            return client
+        except Exception as e:
+            last_exc = e
+            logging.info(f"Default Binance endpoint init failed: {e}")
+            time.sleep(1)
+
+    # Try known alternate endpoints
+    alternate_endpoints = [
+        'https://api1.binance.com',
+        'https://api2.binance.com',
+        'https://api3.binance.com',
+        'https://api-gcp.binance.com',
+    ]
+    original_api_url = getattr(Client, 'API_URL', 'https://api.binance.com')
+    for ep in alternate_endpoints:
+        try:
+            # Temporarily point the class-level API URL and construct
+            Client.API_URL = ep
+            client = Client(api_key, api_secret, requests_params=requests_params)
+            client.futures_ping()
+            logging.info(f"Initialized Binance client via alternate endpoint: {ep}")
+            return client
+        except Exception as e:
+            last_exc = e
+            logging.info(f"Alternate endpoint init failed on {ep}: {e}")
+            time.sleep(1)
+        finally:
+            # Restore for next attempt/normal use
+            Client.API_URL = original_api_url
+
+    raise last_exc if last_exc else RuntimeError("Unable to initialize Binance client")
+
+def sync_client_timestamp(client: Client) -> None:
+    """Synchronize client's timestamp offset with Binance futures server time.
+
+    Prevents APIError -1021 (timestamp outside recvWindow) on signed endpoints
+    by aligning local time with server time.
+    """
+    try:
+        server_time = client.futures_time()
+        server_ms = int(server_time.get('serverTime'))
+        local_ms = int(time.time() * 1000)
+        client.timestamp_offset = server_ms - local_ms
+        logging.info(f"Applied Binance timestamp offset: {client.timestamp_offset} ms")
+    except Exception as e:
+        logging.warning(f"Could not sync client timestamp: {e}")
 
 def interval_to_milliseconds(interval):
     seconds_per_unit = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -111,17 +174,7 @@ inhibition_start_time = None
 inhibition_trigger_trade_count = 0  # Track how many trades existed when inhibition was triggered
 INHIBITION_DURATION_MINUTES = 30
 
-# News-based trading inhibition system
-news_inhibited = False
-news_inhibition_start_time = None
-news_inhibition_end_time = None
-last_news_check_time = None
-NEWS_CHECK_INTERVAL_MINUTES = 5  # Check for news every 5 minutes
-NEWS_PRE_BUFFER_MINUTES = 10  # Stop trading 10 minutes before high-impact news
-NEWS_POST_BUFFER_MINUTES = 30  # Stop trading 30 minutes after high-impact news
-# Total inhibition time: 40 minutes (10 min before + 30 min after news detection)
-CRYPTOPANIC_API_URL = "https://cryptopanic.com/api/v1/posts/"
-CRYPTOPANIC_API_KEY = "d36cbec562b368cfbccfaf965c491b95f4576325"  # Get free API key from cryptopanic.com
+# News-based trading inhibition system removed per user request
 
 
 def check_last_two_trades_and_manage_inhibition():
@@ -193,219 +246,9 @@ def check_last_two_trades_and_manage_inhibition():
         logging.error(f"Error checking last two trades: {e}")
         return True  # Allow trading on error
 
-def fetch_crypto_news():
-    """Fetch high-impact crypto news from CryptoPanic API"""
-    try:
-        # Use public API (no key required) or get free API key from cryptopanic.com
-        params = {
-            'auth_token': CRYPTOPANIC_API_KEY if CRYPTOPANIC_API_KEY != "your_api_key_here" else None,
-            'public': 'true',
-            'filter': 'hot',  # Only high-impact news
-            'currencies': 'BTC,ETH,BNB,SOL,ADA,XRP,DOGE,AVAX,MATIC,DOT,LINK,LTC,UNI,ATOM,NEAR,ALGO,FTM,MANA,SAND,AXS,CHZ,ENJ,FLOW,ICP,THETA,VET,HBAR,EGLD,ONE,ROSE,SCRT,ALGO,NEAR,FTM,MANA,SAND,AXS,CHZ,ENJ,FLOW,ICP,THETA,VET,HBAR,EGLD,ONE,ROSE,SCRT',
-            'kind': 'news',
-            'metadata': 'true'
-        }
-        
-        # Remove None values from params
-        params = {k: v for k, v in params.items() if v is not None}
-        
-        response = requests.get(CRYPTOPANIC_API_URL, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        return data.get('results', [])
-        
-    except Exception as e:
-        logging.error(f"Error fetching crypto news: {e}")
-        return []
-
-def is_high_impact_news(news_item):
-    """Check if a news item is high-impact based on various criteria"""
-    try:
-        title = news_item.get('title', '').lower()
-        metadata = news_item.get('metadata', {})
-        
-        # High-impact keywords
-        high_impact_keywords = [
-            'fed', 'federal reserve', 'interest rate', 'rate hike', 'rate cut', 'inflation', 'cpi', 'pce', 'employment', 'jobs report', 'nfp'
-        ]
-        
-        # Check title for high-impact keywords
-        for keyword in high_impact_keywords:
-            if keyword in title:
-                return True
-        
-        # Check metadata for high impact indicators
-        if metadata:
-            # Check if it's marked as important
-            if metadata.get('important', False):
-                return True
-            
-            # Check source reliability
-            source = metadata.get('source', {}).get('title', '').lower()
-            reliable_sources = [
-                'coindesk', 'cointelegraph', 'bloomberg', 'reuters', 'wsj',
-                'forbes', 'cnbc', 'marketwatch', 'yahoo finance', 'benzinga',
-                'decrypt', 'the block', 'crypto news', 'bitcoin magazine'
-            ]
-            
-            for reliable_source in reliable_sources:
-                if reliable_source in source:
-                    return True
-        
-        return False
-        
-    except Exception as e:
-        logging.error(f"Error checking news impact: {e}")
-        return False
-
 def close_all_existing_trades():
-    """Close all existing trades when high-impact news is detected"""
-    global active_trades, orders, tradereport
-    
-    try:
-        logging.warning("High-impact news detected! Closing all existing trades...")
-        
-        closed_trades = []
-        
-        # Close all active trades
-        with active_trades_lock:
-            for trader in list(active_trades):
-                try:
-                    # Get current position from exchange
-                    positions = trader.client.futures_position_information()
-                    active_position = next((p for p in positions if p['symbol'] == trader.symbol and float(p['positionAmt']) != 0), None)
-                    
-                    if active_position:
-                        position_amt = float(active_position['positionAmt'])
-                        entry_price = float(active_position['entryPrice'])
-                        
-                        # Close the position
-                        side = 'SELL' if position_amt > 0 else 'BUY'
-                        close_order = trader.client.futures_create_order(
-                            symbol=trader.symbol,
-                            type='MARKET',
-                            side=side,
-                            quantity=abs(position_amt),
-                            reduceOnly=True
-                        )
-                        
-                        # Calculate profit/loss
-                        exit_price = float(close_order.get('avgPrice', 0.0))
-                        if exit_price == 0.0:
-                            time.sleep(0.5)  # Wait for fill
-                            order_details = trader.client.futures_get_order(symbol=trader.symbol, orderId=close_order['orderId'])
-                            exit_price = float(order_details.get('avgPrice', 0.0))
-                        
-                        if position_amt > 0:  # Long position
-                            profit = (exit_price - entry_price) * abs(position_amt)
-                        else:  # Short position
-                            profit = (entry_price - exit_price) * abs(position_amt)
-                        
-                        # Add to trade report
-                        trade_data = {
-                            'symbol': trader.symbol,
-                            'side': 'BUY' if position_amt > 0 else 'SELL',
-                            'entry_price': entry_price,
-                            'tp_price': trader.tp_level,
-                            'sl_price': trader.sl_level,
-                            'exit_price': exit_price,
-                            'choppy': 'N/A',  # Not applicable for news closure
-                            'profit': round(profit, 4)
-                        }
-                        
-                        with orders_lock:
-                            tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
-                        
-                        closed_trades.append({
-                            'symbol': trader.symbol,
-                            'side': 'BUY' if position_amt > 0 else 'SELL',
-                            'profit': round(profit, 4)
-                        })
-                        
-                        logging.warning(f"Closed {trader.symbol} position: {trade_data['side']} at {exit_price:.4f}, P/L: {profit:.4f}")
-                        
-                        # Reset trader state
-                        trader._reset_position_state()
-                    
-                except Exception as e:
-                    logging.error(f"Error closing position for {trader.symbol}: {e}")
-                    continue
-        
-        # Clear orders DataFrame
-        with orders_lock:
-            orders = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price', 'choppy'])
-        
-        if closed_trades:
-            logging.warning(f"Closed {len(closed_trades)} trades due to news:")
-            for trade in closed_trades:
-                logging.warning(f"  - {trade['symbol']} {trade['side']}: {trade['profit']:.4f} USDT")
-        
-        return True
-        
-    except Exception as e:
-        logging.error(f"Error closing all existing trades: {e}")
-        return False
-
-def check_news_and_manage_inhibition():
-    """Check for high-impact news and manage trading inhibition"""
-    global news_inhibited, news_inhibition_start_time, news_inhibition_end_time, last_news_check_time
-    
-    try:
-        current_time = datetime.now(UTC)
-        
-        # Check if we need to fetch news (every 5 minutes)
-        if (last_news_check_time is None or 
-            (current_time - last_news_check_time).total_seconds() >= NEWS_CHECK_INTERVAL_MINUTES * 60):
-            
-            logging.info("Checking for high-impact crypto news...")
-            news_items = fetch_crypto_news()
-            last_news_check_time = current_time
-            
-            # Check for high-impact news
-            high_impact_news = []
-            for news_item in news_items:
-                if is_high_impact_news(news_item):
-                    high_impact_news.append(news_item)
-            
-            if high_impact_news:
-                logging.warning(f"Found {len(high_impact_news)} high-impact news items:")
-                for news in high_impact_news[:3]:  # Log first 3 items
-                    logging.warning(f"  - {news.get('title', 'No title')}")
-                    logging.warning(f"    Source: {news.get('metadata', {}).get('source', {}).get('title', 'Unknown')}")
-                    logging.warning(f"    Published: {news.get('created_at', 'Unknown time')}")
-                
-                # Close all existing trades immediately
-                close_all_existing_trades()
-                
-                # Set news inhibition period (10 min before + 30 min after = 40 min total)
-                news_inhibited = True
-                news_inhibition_start_time = current_time
-                news_inhibition_end_time = current_time + timedelta(minutes=NEWS_PRE_BUFFER_MINUTES + NEWS_POST_BUFFER_MINUTES)
-                
-                logging.warning(f"Trading inhibited due to high-impact news until {news_inhibition_end_time}")
-                return False
-        
-        # Check if we're currently in a news inhibition period
-        if news_inhibited and news_inhibition_end_time:
-            if current_time >= news_inhibition_end_time:
-                # News inhibition period has ended
-                news_inhibited = False
-                news_inhibition_start_time = None
-                news_inhibition_end_time = None
-                logging.info("News inhibition period ended. Resuming normal trading.")
-                return True
-            else:
-                # Still in news inhibition period
-                remaining_minutes = (news_inhibition_end_time - current_time).total_seconds() / 60
-                logging.debug(f"Trading still inhibited due to news. {remaining_minutes:.1f} minutes remaining.")
-                return False
-        
-        return True  # Allow trading if no news inhibition
-        
-    except Exception as e:
-        logging.error(f"Error checking news and managing inhibition: {e}")
-        return True  # Allow trading on error
+    # News system removed; function retained only if referenced elsewhere
+    return False
 
 def print_trading_status():
     """Print current orders and trade reports with formatting."""
@@ -416,7 +259,7 @@ def print_trading_status():
     print("="*100)
     print('BALANCE:'.center(100))
     print('='*100)
-    print(usdt_balance)     
+    print(usdt_balance).center(100)      
     print("="*100)
     print("CURRENT ACTIVE TRADES:".center(100))
     print("="*100)
@@ -475,25 +318,15 @@ def print_trading_status():
     print("TRADING STATUS:".center(100))
     print("="*100)
     
-    # Check both types of inhibition
+    # Check inhibition (news system removed)
     loss_inhibited = trading_inhibited
-    news_inhibited_status = news_inhibited
-    
-    if loss_inhibited and news_inhibited_status:
-        print("TRADING INHIBITED - Losses + News".center(100))
-    elif loss_inhibited:
+    if loss_inhibited:
         if inhibition_start_time:
             time_elapsed = datetime.now(UTC) - inhibition_start_time
             remaining_minutes = INHIBITION_DURATION_MINUTES - (time_elapsed.total_seconds() / 60)
             print(f"TRADING INHIBITED - Losses ({remaining_minutes:.1f} min remaining)".center(100))
         else:
             print("TRADING INHIBITED - Losses (Time unknown)".center(100))
-    elif news_inhibited_status:
-        if news_inhibition_end_time:
-            remaining_minutes = (news_inhibition_end_time - datetime.now(UTC)).total_seconds() / 60
-            print(f"TRADING INHIBITED - News ({remaining_minutes:.1f} min remaining)".center(100))
-        else:
-            print("TRADING INHIBITED - News (Time unknown)".center(100))
     else:
         print("TRADING ACTIVE".center(100))
     
@@ -566,12 +399,14 @@ class ForwardIchimokuTrader:
         self.logger.info("Initializing Trader...")
 
         try:
-            self.client = Client(API_KEY, API_SECRET)
+            self.client = create_binance_client_with_failover(API_KEY, API_SECRET)
             # Test futures endpoint specifically
             self.client.futures_ping()
+            # Sync timestamp to avoid -1021 errors on signed endpoints
+            sync_client_timestamp(self.client)
             # Set initial futures mode to one-way position mode
             try:
-                self.client.futures_change_position_mode(dualSidePosition=False)
+                self.client.futures_change_position_mode(dualSidePosition=False, recvWindow=5000)
             except Exception as e:
                 if "No need to change position side" not in str(e):
                     raise
@@ -1137,6 +972,17 @@ class ForwardIchimokuTrader:
                             tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
                         self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}, profit: {trade_data['profit']}")
                         self.logger.info(f"Trade data added: {trade_data}")
+                        try:
+                            if 'telegram_reporter' in globals() and telegram_reporter:
+                                side_text = trade_data['side']
+                                exit_price_text = f"{trade_data['exit_price']:.4f}"
+                                pnl_text = f"{trade_data['profit']:.4f} USDT"
+                                telegram_reporter.send(
+                                    f"<b>Closed</b> <code>{self.symbol}</code> {side_text} @ {exit_price_text}\n"
+                                    f"PnL: {pnl_text}"
+                                )
+                        except Exception:
+                            pass
                         # Immediately display updated completed trades and persist
                         try:
                             print_trading_status()
@@ -1442,6 +1288,17 @@ class ForwardIchimokuTrader:
                 
                 self.entry_price = actual_entry_price
                 self.logger.info(f"Step 10: Position state set - position={self.position}, entry_price={self.entry_price}")
+                try:
+                    # Short Telegram notification on successful entry
+                    if 'telegram_reporter' in globals() and telegram_reporter:
+                        side_text = 'BUY' if direction == 1 else 'SELL'
+                        qty_text = f"{self.position_size}"
+                        price_text = f"{self.entry_price:.4f}"
+                        telegram_reporter.send(
+                            f"<b>Entered</b> <code>{self.symbol}</code> {side_text} qty {qty_text} @ {price_text}"
+                        )
+                except Exception:
+                    pass
 
             except Exception as e:
                 self.logger.error(f"FAILED TO PLACE ENTRY ORDER. Error: {e}", exc_info=True)
@@ -1702,6 +1559,7 @@ class ForwardIchimokuTrader:
                 time.sleep(30)
         
         self.logger.info("Forward testing loop finished.")
+        
         tradereport.to_csv('trader_report.csv', index=False)
 
     def _submit_signal(self, direction, price, atr, choppy):
@@ -1710,10 +1568,7 @@ class ForwardIchimokuTrader:
             self.logger.info(f"Signal submission blocked for {self.symbol} due to trading inhibition (last 2 trades were losses)")
             return
         
-        # Check if trading is inhibited due to news
-        if not check_news_and_manage_inhibition():
-            self.logger.info(f"Signal submission blocked for {self.symbol} due to news inhibition (high-impact news detected)")
-            return
+        # News inhibition removed
         
         signal = {
             'symbol': self.symbol,
@@ -1735,10 +1590,7 @@ class ForwardIchimokuTrader:
             logging.info("Trade execution blocked due to trading inhibition (last 2 trades were losses)")
             return
         
-        # Check if trading is inhibited due to news
-        if not check_news_and_manage_inhibition():
-            logging.info("Trade execution blocked due to news inhibition (high-impact news detected)")
-            return
+        # News inhibition removed
         
         signals_to_execute = []
         with signal_pool_lock:
@@ -1792,16 +1644,21 @@ class ForwardIchimokuTrader:
 
 if __name__ == "__main__":
     try:
+        if telegram_reporter:
+            telegram_reporter.send("<b>Trading bot starting</b> — environment configured and logger attached.")
         # Initialize Binance client
-        client = Client(API_KEY, API_SECRET)
+        client = create_binance_client_with_failover(API_KEY, API_SECRET)
         
         # Test connection
         try:
-            client.ping()
-            logging.info("Successfully connected to Binance API")
+            client.futures_ping()
+            logging.info("Successfully connected to Binance Futures API")
         except Exception as e:
             logging.critical(f"Failed to connect to Binance API: {e}")
             sys.exit(1)
+
+        # Sync timestamp to avoid -1021 on signed requests
+        sync_client_timestamp(client)
         
         # Check account balance
         try:
@@ -1815,6 +1672,8 @@ if __name__ == "__main__":
             effective_buying_power = usdt_balance * LEVERAGE
             logging.info(f"Current USDT futures balance: ${usdt_balance:.2f}")
             logging.info(f"Effective buying power with {LEVERAGE}x leverage: ${effective_buying_power:.2f}")
+            if telegram_reporter:
+                telegram_reporter.send(f"<b>Available balance</b>: ${usdt_balance:.2f} USDT")
             
             min_margin_for_trade = 5.0 / LEVERAGE  # Minimum margin needed for $5 trade
             if usdt_balance < min_margin_for_trade:
@@ -1887,17 +1746,7 @@ if __name__ == "__main__":
         picker_thread = threading.Thread(target=trade_picker_loop, daemon=True)
         picker_thread.start()
         
-        # Add a thread to periodically check for news
-        def news_checker_loop():
-            while True:
-                try:
-                    check_news_and_manage_inhibition()
-                except Exception as e:
-                    logging.error(f"Error in news checker loop: {e}")
-                time.sleep(3600*6)  # Check every 6 hours
-
-        news_thread = threading.Thread(target=news_checker_loop, daemon=True)
-        news_thread.start()
+        # News checker removed
 
         # Wait for all threads to finish
         try:
@@ -1917,6 +1766,9 @@ if __name__ == "__main__":
                 logging.error(f"Failed to save trade report: {e}")
             
             logging.info("Trading bot shutdown complete")
+            if telegram_reporter:
+                telegram_reporter.send("<b>Trading bot shutdown complete</b>")
+                telegram_reporter.stop(drain=True)
             
     except Exception as e:
         logging.critical(f"Fatal error in main execution: {e}", exc_info=True)
