@@ -46,7 +46,7 @@ SP_MULTIPLIER = 3.5
 LEVERAGE = 2
 TC = 0.0005
 
-ASSETS = ['1000BONKUSDT','FETUSDT']
+ASSETS = ['1000BONKUSDT','SANDUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
 active_trades = []
