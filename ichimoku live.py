@@ -46,7 +46,7 @@ SP_MULTIPLIER = 3.5
 LEVERAGE = 2
 TC = 0.0005
 
-ASSETS = ['1000BONKUSDT','SANDUSDT']
+ASSETS = ['DOGEUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','FETUSDT','GRTUSDT','DOTUSDT','LINKUSDT','SUIUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
 active_trades = []
@@ -111,21 +111,6 @@ def create_binance_client_with_failover(api_key: str, api_secret: str) -> Client
             Client.API_URL = original_api_url
 
     raise last_exc if last_exc else RuntimeError("Unable to initialize Binance client")
-
-def sync_client_timestamp(client: Client) -> None:
-    """Synchronize client's timestamp offset with Binance futures server time.
-
-    Prevents APIError -1021 (timestamp outside recvWindow) on signed endpoints
-    by aligning local time with server time.
-    """
-    try:
-        server_time = client.futures_time()
-        server_ms = int(server_time.get('serverTime'))
-        local_ms = int(time.time() * 1000)
-        client.timestamp_offset = server_ms - local_ms
-        logging.info(f"Applied Binance timestamp offset: {client.timestamp_offset} ms")
-    except Exception as e:
-        logging.warning(f"Could not sync client timestamp: {e}")
 
 def interval_to_milliseconds(interval):
     seconds_per_unit = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -264,7 +249,7 @@ def print_trading_status():
     for balance in available_balance:
         if balance['asset'] == 'USDT':
             usdt_balance = float(balance['availableBalance'])  
-    print(f"Available balance: {usdt_balance} USDT".center(100)) 
+    print(f"Available balance: {usdt_balance} USDT".center(100))
     print("="*100)
     print("CURRENT ACTIVE TRADES:".center(100))
     print("="*100)
@@ -407,11 +392,9 @@ class ForwardIchimokuTrader:
             self.client = create_binance_client_with_failover(API_KEY, API_SECRET)
             # Test futures endpoint specifically
             self.client.futures_ping()
-            # Sync timestamp to avoid -1021 errors on signed endpoints
-            sync_client_timestamp(self.client)
             # Set initial futures mode to one-way position mode
             try:
-                self.client.futures_change_position_mode(dualSidePosition=False, recvWindow=5000)
+                self.client.futures_change_position_mode(dualSidePosition=False)
             except Exception as e:
                 if "No need to change position side" not in str(e):
                     raise
@@ -921,11 +904,23 @@ class ForwardIchimokuTrader:
     def _check_tp_sl_hits(self):
         """Check for TP/SL hits and add them to trade report"""
         try:
+            # First check if position is still active on exchange
+            if self.position != 0:
+                positions = self.client.futures_position_information()
+                active_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
+                
+                if not active_position:
+                    # Position was closed but we didn't detect it through orders
+                    self.logger.info(f"Position for {self.symbol} was closed but not detected through orders. Resetting state.")
+                    self._reset_position_state()
+                    return
+            
             # Get orders for the current symbol
             symbol_orders = self.client.futures_get_all_orders(symbol=self.symbol)
             
             # Check for TP/SL hit orders and add to tradereport
             self.logger.debug(f"Checking {len(symbol_orders)} orders for {self.symbol} for TP/SL hits...")
+            self.logger.debug(f"Current position state: {self.position}, entry_price: {self.entry_price}, position_size: {self.position_size}")
             for order in symbol_orders:
                 if order['status'] == 'FILLED':
                     if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
@@ -939,9 +934,15 @@ class ForwardIchimokuTrader:
                         # Create trade report entry for TP/SL hit
                         exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
                         
-                        # Determine original position side based on order side
-                        # TP/SL orders have opposite side to original position
-                        original_position_side = 'SELL' if order['side'] == 'BUY' else 'BUY'
+                        # Determine original position side based on current position state
+                        # Use the actual position side from the trader's state
+                        if self.position == 1:
+                            original_position_side = 'BUY'  # Long position
+                        elif self.position == -1:
+                            original_position_side = 'SELL'  # Short position
+                        else:
+                            # Fallback: try to determine from order side (TP/SL orders are opposite to position)
+                            original_position_side = 'SELL' if order['side'] == 'BUY' else 'BUY'
                         
                         # Calculate profit/loss
                         if self.position_size > 0:
@@ -949,6 +950,7 @@ class ForwardIchimokuTrader:
                                 profit = (exit_price - self.entry_price) * self.position_size
                             else:  # Short position closed
                                 profit = (self.entry_price - exit_price) * self.position_size
+                            self.logger.info(f"PnL calculation: {original_position_side} position, entry: {self.entry_price}, exit: {exit_price}, size: {self.position_size}, profit: {profit}")
                         else:
                             # Fallback: try to get position size from the order
                             order_qty = float(order['executedQty']) if 'executedQty' in order else 0
@@ -957,8 +959,10 @@ class ForwardIchimokuTrader:
                                     profit = (exit_price - self.entry_price) * order_qty
                                 else:  # Short position closed
                                     profit = (self.entry_price - exit_price) * order_qty
+                                self.logger.info(f"PnL calculation (fallback): {original_position_side} position, entry: {self.entry_price}, exit: {exit_price}, size: {order_qty}, profit: {profit}")
                             else:
                                 profit = 0.0  # Cannot calculate profit without position size
+                                self.logger.warning(f"Cannot calculate PnL: no position size available")
                         
                         trade_data = {
                             'symbol': self.symbol,
@@ -986,8 +990,26 @@ class ForwardIchimokuTrader:
                                     f"<b>Closed</b> <code>{self.symbol}</code> {side_text} @ {exit_price_text}\n"
                                     f"PnL: {pnl_text}"
                                 )
-                        except Exception:
-                            pass
+                                self.logger.info(f"Telegram PnL notification sent for {self.symbol}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to send Telegram PnL notification: {e}")
+                        # Reset position state after TP/SL hit
+                        self.position = 0
+                        self.entry_price = 0.0
+                        self.position_size = 0.0
+                        self.tp_level = None
+                        self.sl_level = None
+                        self.highest_price_since_entry = None
+                        self.lowest_price_since_entry = None
+                        self.orderid = None
+                        self.tp_orderid = None
+                        
+                        # Remove from active trades
+                        with active_trades_lock:
+                            if self in active_trades:
+                                active_trades.remove(self)
+                                self.logger.info(f"Removed {self.symbol} from active trades after TP/SL hit")
+                        
                         # Immediately display updated completed trades and persist
                         try:
                             print_trading_status()
@@ -1042,7 +1064,7 @@ class ForwardIchimokuTrader:
     def manage_position(self) -> None:
 
         try:
-            # Check for TP/SL hits first
+            # Always check for TP/SL hits first - this should run regardless of position state
             self._check_tp_sl_hits()
             
             # Always get the real-time position status from the exchange
@@ -1066,10 +1088,10 @@ class ForwardIchimokuTrader:
                 ltf_sell = self._check_LTF_confirmation('sell')
                 buy_signal, sell_signal = self._check_signals()
                 self.logger.info(f"Signal check for {self.symbol}: HTF_buy={hft_buy}, LTF_buy={ltf_buy}, buy_signal={buy_signal}, HTF_sell={hft_sell}, LTF_sell={ltf_sell}, sell_signal={sell_signal}")
-                if  buy_signal:
+                if hft_buy and ltf_buy and buy_signal:
                     self.logger.info(f"Submitting BUY signal for {self.symbol}")
                     self._submit_signal('buy', current_price, atr, last_row['choppy'])
-                elif sell_signal:
+                elif hft_sell and ltf_sell and sell_signal:
                     self.logger.info(f"Submitting SELL signal for {self.symbol}")
                     self._submit_signal('sell', current_price, atr, last_row['choppy'])
                 return
@@ -1292,7 +1314,7 @@ class ForwardIchimokuTrader:
                     return
                 
                 self.entry_price = actual_entry_price
-                self.logger.info(f"Step 10: Position state set - position={self.position}, entry_price={self.entry_price}")
+                
                 try:
                     # Short Telegram notification on successful entry
                     if 'telegram_reporter' in globals() and telegram_reporter:
@@ -1401,9 +1423,15 @@ class ForwardIchimokuTrader:
                     # Create trade report entry for TP/SL hit
                     exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
                     
-                    # Determine original position side based on order side
-                    # TP/SL orders have opposite side to original position
-                    original_position_side = 'SELL' if order['side'] == 'BUY' else 'BUY'
+                    # Determine original position side based on current position state
+                    # Use the actual position side from the trader's state
+                    if self.position == 1:
+                        original_position_side = 'BUY'  # Long position
+                    elif self.position == -1:
+                        original_position_side = 'SELL'  # Short position
+                    else:
+                        # Fallback: try to determine from order side (TP/SL orders are opposite to position)
+                        original_position_side = 'SELL' if order['side'] == 'BUY' else 'BUY'
                     
                     # Calculate profit/loss
                     if self.position_size > 0:
@@ -1411,6 +1439,7 @@ class ForwardIchimokuTrader:
                             profit = (exit_price - self.entry_price) * self.position_size
                         else:  # Short position closed
                             profit = (self.entry_price - exit_price) * self.position_size
+                        self.logger.info(f"PnL calculation (reset): {original_position_side} position, entry: {self.entry_price}, exit: {exit_price}, size: {self.position_size}, profit: {profit}")
                     else:
                         # Fallback: try to get position size from the order
                         order_qty = float(order['executedQty']) if 'executedQty' in order else 0
@@ -1419,8 +1448,10 @@ class ForwardIchimokuTrader:
                                 profit = (exit_price - self.entry_price) * order_qty
                             else:  # Short position closed
                                 profit = (self.entry_price - exit_price) * order_qty
+                            self.logger.info(f"PnL calculation (reset fallback): {original_position_side} position, entry: {self.entry_price}, exit: {exit_price}, size: {order_qty}, profit: {profit}")
                         else:
                             profit = 0.0  # Cannot calculate profit without position size
+                            self.logger.warning(f"Cannot calculate PnL (reset): no position size available")
                     
                     trade_data = {
                         'symbol': self.symbol,
@@ -1439,6 +1470,20 @@ class ForwardIchimokuTrader:
                         tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
                     self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}, profit: {trade_data['profit']}")
                     self.logger.info(f"Trade data added: {trade_data}")
+                    
+                    # Send Telegram PnL notification
+                    try:
+                        if 'telegram_reporter' in globals() and telegram_reporter:
+                            side_text = trade_data['side']
+                            exit_price_text = f"{trade_data['exit_price']:.4f}"
+                            pnl_text = f"{trade_data['profit']:.4f} USDT"
+                            telegram_reporter.send(
+                                f"<b>Closed</b> <code>{self.symbol}</code> {side_text} @ {exit_price_text}\n"
+                                f"PnL: {pnl_text}"
+                            )
+                    except Exception as e:
+                        self.logger.error(f"Failed to send Telegram PnL notification: {e}")
+                    
                     # Immediately display updated completed trades and persist
                     try:
                         print_trading_status()
@@ -1661,9 +1706,6 @@ if __name__ == "__main__":
         except Exception as e:
             logging.critical(f"Failed to connect to Binance API: {e}")
             sys.exit(1)
-
-        # Sync timestamp to avoid -1021 on signed requests
-        sync_client_timestamp(client)
         
         # Check account balance
         try:
