@@ -1088,10 +1088,10 @@ class ForwardIchimokuTrader:
                 ltf_sell = self._check_LTF_confirmation('sell')
                 buy_signal, sell_signal = self._check_signals()
                 self.logger.info(f"Signal check for {self.symbol}: HTF_buy={hft_buy}, LTF_buy={ltf_buy}, buy_signal={buy_signal}, HTF_sell={hft_sell}, LTF_sell={ltf_sell}, sell_signal={sell_signal}")
-                if hft_buy and ltf_buy and buy_signal:
+                if buy_signal:
                     self.logger.info(f"Submitting BUY signal for {self.symbol}")
                     self._submit_signal('buy', current_price, atr, last_row['choppy'])
-                elif hft_sell and ltf_sell and sell_signal:
+                elif sell_signal:
                     self.logger.info(f"Submitting SELL signal for {self.symbol}")
                     self._submit_signal('sell', current_price, atr, last_row['choppy'])
                 return
