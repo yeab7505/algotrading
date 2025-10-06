@@ -921,6 +921,7 @@ class ForwardIchimokuTrader:
             # Check for TP/SL hit orders and add to tradereport
             self.logger.debug(f"Checking {len(symbol_orders)} orders for {self.symbol} for TP/SL hits...")
             self.logger.debug(f"Current position state: {self.position}, entry_price: {self.entry_price}, position_size: {self.position_size}")
+            hit_detected_via_orders = False
             for order in symbol_orders:
                 if order['status'] == 'FILLED':
                     if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
@@ -931,6 +932,7 @@ class ForwardIchimokuTrader:
                         
                         self.logger.info(f"Found TP/SL hit: {order['type']} order {order_id} for {self.symbol}")
                         self.processed_orders.add(order_id)
+                        hit_detected_via_orders = True
                         # Create trade report entry for TP/SL hit
                         exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
                         
@@ -1016,7 +1018,98 @@ class ForwardIchimokuTrader:
                             self.logger.info("Trading status printed successfully")
                         except Exception as e:
                             self.logger.error(f"Could not print trading status: {e}")
-                        
+            
+            # Fallback: price-based TP/SL cross detection when orders do not show fills
+            if not hit_detected_via_orders and self.position != 0 and self.tp_level is not None and self.sl_level is not None:
+                try:
+                    last_high = float(self.df['High'].iloc[-1])
+                    last_low = float(self.df['Low'].iloc[-1])
+                    exit_reason = None
+                    exit_price = None
+                    original_position_side = 'BUY' if self.position == 1 else 'SELL'
+
+                    if self.position == 1:
+                        if last_high >= self.tp_level:
+                            exit_reason = 'TP'
+                            exit_price = self.tp_level
+                        elif last_low <= self.sl_level:
+                            exit_reason = 'SL'
+                            exit_price = self.sl_level
+                    elif self.position == -1:
+                        if last_low <= self.tp_level:
+                            exit_reason = 'TP'
+                            exit_price = self.tp_level
+                        elif last_high >= self.sl_level:
+                            exit_reason = 'SL'
+                            exit_price = self.sl_level
+
+                    if exit_reason is not None and exit_price is not None:
+                        # Record as a price-cross detected closure
+                        if self.position_size > 0:
+                            if original_position_side == 'BUY':
+                                profit = (exit_price - self.entry_price) * self.position_size
+                            else:
+                                profit = (self.entry_price - exit_price) * self.position_size
+                        else:
+                            profit = 0.0
+
+                        trade_data = {
+                            'symbol': self.symbol,
+                            'side': original_position_side,
+                            'entry_price': self.entry_price,
+                            'tp_price': self.tp_level,
+                            'sl_price': self.sl_level,
+                            'exit_price': exit_price,
+                            'choppy': 'N/A',
+                            'profit': round(profit, 4)
+                        }
+
+                        self.logger.info(f"Price-cross {exit_reason} detected for {self.symbol} at {exit_price}. Recording trade and resetting state.")
+                        global tradereport
+                        with orders_lock:
+                            tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
+
+                        try:
+                            if 'telegram_reporter' in globals() and telegram_reporter:
+                                side_text = trade_data['side']
+                                exit_price_text = f"{trade_data['exit_price']:.4f}"
+                                pnl_text = f"{trade_data['profit']:.4f} USDT"
+                                telegram_reporter.send(
+                                    f"<b>Closed</b> <code>{self.symbol}</code> {side_text} @ {exit_price_text}\n"
+                                    f"PnL: {pnl_text}"
+                                )
+                                self.logger.info(f"Telegram PnL notification sent for {self.symbol} (price-cross)")
+                        except Exception as e:
+                            self.logger.error(f"Failed to send Telegram PnL notification (price-cross): {e}")
+
+                        # Attempt to clean any remaining reduce-only orders
+                        try:
+                            self._cleaning_existing_order()
+                        except Exception as e:
+                            self.logger.error(f"Failed cleaning orders after price-cross closure: {e}")
+
+                        # Reset internal state
+                        self.position = 0
+                        self.entry_price = 0.0
+                        self.position_size = 0.0
+                        self.tp_level = None
+                        self.sl_level = None
+                        self.highest_price_since_entry = None
+                        self.lowest_price_since_entry = None
+                        self.orderid = None
+                        self.tp_orderid = None
+
+                        with active_trades_lock:
+                            if self in active_trades:
+                                active_trades.remove(self)
+                                self.logger.info(f"Removed {self.symbol} from active trades after price-cross {exit_reason}")
+
+                        try:
+                            print_trading_status()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    self.logger.error(f"Error during price-cross TP/SL detection: {e}")
         except Exception as e:
             self.logger.error(f"Error checking TP/SL hits: {e}", exc_info=True)
 
