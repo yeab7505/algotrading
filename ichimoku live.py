@@ -1065,7 +1065,6 @@ class ForwardIchimokuTrader:
                         }
 
                         self.logger.info(f"Price-cross {exit_reason} detected for {self.symbol} at {exit_price}. Recording trade and resetting state.")
-                        global tradereport
                         with orders_lock:
                             tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
 
@@ -1913,3 +1912,4 @@ if __name__ == "__main__":
     except Exception as e:
         logging.critical(f"Fatal error in main execution: {e}", exc_info=True)
         sys.exit(1)    
+
