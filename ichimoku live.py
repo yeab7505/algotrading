@@ -873,7 +873,7 @@ class ForwardIchimokuTrader:
 
         buy_signal = (
             (current_close > close_t_minus_26)
-            and (conversion_line > base_line)
+            and (conversion_line >= base_line)
             
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
