@@ -878,6 +878,7 @@ class ForwardIchimokuTrader:
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
             and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
+            and (trend == 'up')
             and adx < adx_limit[self.symbol]
             
         )
@@ -888,7 +889,7 @@ class ForwardIchimokuTrader:
             and (current_close < leading_Span_A_shifted)
             and future_kumo_bearish  # Add future Kumo check
             and (not(pd.isna(psar_short)))
-  # Only checks if PSAR exists, not its value
+            and (trend =='down')  # Only checks if PSAR exists, not its value
             and adx < adx_limit[self.symbol]
         )
 
@@ -903,18 +904,7 @@ class ForwardIchimokuTrader:
     def _check_tp_sl_hits(self):
         """Check for TP/SL hits and add them to trade report"""
         try:
-            # First check if position is still active on exchange
-            if self.position != 0:
-                positions = self.client.futures_position_information()
-                active_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
-                
-                if not active_position:
-                    # Position was closed but we didn't detect it through orders
-                    self.logger.info(f"Position for {self.symbol} was closed but not detected through orders. Resetting state.")
-                    self._reset_position_state()
-                    return
-            
-            # Get orders for the current symbol
+            # Get orders for the current symbol first to check for TP/SL hits
             symbol_orders = self.client.futures_get_all_orders(symbol=self.symbol)
             
             # Check for TP/SL hit orders and add to tradereport
@@ -929,7 +919,7 @@ class ForwardIchimokuTrader:
                         if order_id in self.processed_orders:
                             continue
                         
-                        self.logger.info(f"Found TP/SL hit: {order['type']} order {order_id} for {self.symbol}")
+                        self.logger.info(f"Successfully detected {order['type']} order {order_id} for {self.symbol} - processing trade closure")
                         self.processed_orders.add(order_id)
                         hit_detected_via_orders = True
                         # Create trade report entry for TP/SL hit
@@ -1018,6 +1008,17 @@ class ForwardIchimokuTrader:
                         except Exception as e:
                             self.logger.error(f"Could not print trading status: {e}")
             
+            # Check if position is still active on exchange (after processing orders)
+            if self.position != 0 and not hit_detected_via_orders:
+                positions = self.client.futures_position_information()
+                active_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
+                
+                if not active_position:
+                    # Position was closed but we couldn't detect it through orders or price-cross
+                    self.logger.info(f"Position for {self.symbol} was closed but not detected through orders or price-cross. Resetting state.")
+                    self._reset_position_state()
+                    return
+            
             # Fallback: price-based TP/SL cross detection when orders do not show fills
             if not hit_detected_via_orders and self.position != 0 and self.tp_level is not None and self.sl_level is not None:
                 try:
@@ -1043,7 +1044,7 @@ class ForwardIchimokuTrader:
                             exit_price = self.sl_level
 
                     if exit_reason is not None and exit_price is not None:
-                        # Record as a price-cross detected closure
+                        # Record as a price-cross detected closure   
                         if self.position_size > 0:
                             if original_position_side == 'BUY':
                                 profit = (exit_price - self.entry_price) * self.position_size
@@ -1911,4 +1912,3 @@ if __name__ == "__main__":
     except Exception as e:
         logging.critical(f"Fatal error in main execution: {e}", exc_info=True)
         sys.exit(1)    
-
