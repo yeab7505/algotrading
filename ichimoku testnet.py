@@ -13,16 +13,10 @@ import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from tools import measure
+
 from binance import ThreadedWebsocketManager
 
-# Add scikit-learn imports
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import silhouette_score
+
 
 # Set pandas option to handle future behavior
 pd.set_option('future.no_silent_downcasting', True)
