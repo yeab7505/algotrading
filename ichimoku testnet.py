@@ -13,10 +13,16 @@ import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-
+from tools import measure
 from binance import ThreadedWebsocketManager
 
-
+# Add scikit-learn imports
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import silhouette_score
 
 # Set pandas option to handle future behavior
 pd.set_option('future.no_silent_downcasting', True)
@@ -864,7 +870,8 @@ class ForwardIchimokuTrader:
 
             if len(self.df) >= 15:
                 self.df['atr'] = ta.atr(self.df['High'], self.df['Low'], self.df['Close'], length=14)
-                self.df['adx'] = ta.adx(self.df['High'], self.df['Low'], self.df['Close'], length=14)
+                adx=ta.adx(self.df['High'],self.df['Low'],self.df['Close'])
+                self.df['ADX_14'] = adx['ADX_14']
                 self.df['choppy'] = ta.chop(self.df['High'],self.df['Low'],self.df['Close'])
                 psar = ta.psar(self.df['High'],self.df['Low'],self.df['Close'])
                 
