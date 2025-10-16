@@ -11,6 +11,18 @@ import threading
 from datetime import datetime, timedelta, UTC
 import sys
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from tools import measure
+from binance import ThreadedWebsocketManager
+
+# Add scikit-learn imports
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import silhouette_score
 
 # Set pandas option to handle future behavior
 pd.set_option('future.no_silent_downcasting', True)
@@ -20,7 +32,8 @@ API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
 API_SECRET = "bz1m4UlthzklqXlWoqAqXZiJE35jjT0g5uJ5cQ43vwDNnsIpPYS5OqevfBVz84iK"
 
 #these will be used to make asset specifice decsion on tp and sl multi]plier
-multiplier_set={'ETHUSDT':[1,3],'BTCUSDT':[1,3],'SOLUSDT':[1,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[1,3.5],'TRXUSDT':[3.5,3],'LTCUSDT':[1,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[1,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[1.5,3.5],'HBARUSDT':[1,3.5],'SANDUSDT':[3.5,3.5],'1000PEPEUSDT':[1,3.5],'1000BONKUSDT':[1,3.5],'GALAUSDT':[1,3.5],'FETUSDT':[1,3.5],"GRTUSDT":[1,3.5],'1000SHIBUSDT':[1,3.5],'ALGOUSDT':[1,3.5]}
+multiplier_set={'ETHUSDT':[1,3],'BTCUSDT':[1,3],'SOLUSDT':[1,3.5],'XRPUSDT':[3.5,3],'BNBUSDT':[2.5,3],'TONUSDT':[1,3.5],'DOGEUSDT':[1,3.5],'TRXUSDT':[3.5,3],'LTCUSDT':[1,3.5],'GUNUSDT':[3,3.5],'TUTUSDT':[1,3.5],'ADAUSDT':[1,3.5],'XLMUSDT':[1,3.5],'VETUSDT':[1.5,3.5],'HBARUSDT':[1,3.5],'SANDUSDT':[3.5,3.5],'GALAUSDT':[1,3.5],'FETUSDT':[1,3.5],"GRTUSDT":[1,3.5]}
+adx_limit= {'ETHUSDT':80,'BTCUSDT':40,'SOLUSDT':30,'XRPUSDT':40,"TONUSDT":30,'DOGEUSDT':40,'TRXUSDT':70,'LTCUSDT':50,'ADAUSDT':50,'XLMUSDT':60,'VETUSDT':40,'HBARUSDT':40,'SANDUSDT':50,'1000PEPEUSDT':50,'1000BONKUSDT':70,'GALAUSDT':60,'FETUSDT':50,'GRTUSDT':60,'1000SHIBUSDT':40,'DOTUSDT':70,'LINKUSDT':50,'AVAXUSDT':40,'SUIUSDT':80}
 
 orders_lock = threading.Lock()
 orders = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price', 'sl_price','choppy'])
@@ -35,8 +48,9 @@ SP_MULTIPLIER = 2.4
 LEVERAGE = 1
 TC = 0.0005
 SIMULATED_INITIAL_BALANCE = 100
-ASSETS = ['ETHUSDT', 'BTCUSDT', 'BNBUSDT', 'XRPUSDT', 'LTCUSDT','SOLUSDT',"TONUSDT",'DOGEUSDT','TRXUSDT','1000SHIBUSDT','GUNUSDT','TUTUSDT','ADAUSDT','XLMUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','GALAUSDT','FETUSDT','GRTUSDT']
-MAX_TRENDING_ASSETS = 10  # Maximum number of trending assets to trade
+ASSETS = ['ETHUSDT', 'BTCUSDT', 'BNBUSDT', 'XRPUSDT', 'LTCUSDT','SOLUSDT',"TONUSDT",'DOGEUSDT','TRXUSDT','SHIBUSDT','GUNUSDT','TUTUSDT','ADAUSDT','XLMUSDT','VETUSDT','HBARUSDT','SANDUSDT','1000PEPEUSDT','1000BONKUSDT','GALAUSDT','FETUSDT','GRTUSDT']
+
+MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.DEBUG,
@@ -57,9 +71,9 @@ def interval_to_milliseconds(interval):
             pass
     logging.error(f"Interval format {interval} not fully supported for ms conversion.")
     return None
-"""
+
 def get_all_usdt_pairs(client):
-    #Get all available USDT trading pairs from Binance.
+    """Get all available USDT trading pairs from Binance."""
 
     try:
      
@@ -80,7 +94,7 @@ def get_all_usdt_pairs(client):
 # Cache for trend scores to avoid recalculating
 @lru_cache(maxsize=100)
 def get_cached_klines(client, symbol, interval, limit):
-    #Cached version of get_klines to reduce API calls
+    """Cached version of get_klines to reduce API calls"""
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
         if not klines or len(klines) == 0:
@@ -92,7 +106,7 @@ def get_cached_klines(client, symbol, interval, limit):
         return None
 
 def calculate_technical_features(df):
-    #Calculate comprehensive technical indicators using multiple timeframes
+    """Calculate comprehensive technical indicators using multiple timeframes"""
     try:
         if df is None or df.empty:
             return None
@@ -172,13 +186,14 @@ def calculate_technical_features(df):
         return None
 
 def calculate_trend_score(df):
-    
-    #Calculate trend score using multiple sophisticated methods:
-    #1. PCA for dimensionality reduction
-    #2. K-means clustering for pattern recognition
-    #3. Isolation Forest for anomaly detection
-    #5. Ensemble scoring combining all methods
-    
+    """
+    Calculate trend score using multiple sophisticated methods:
+    1. PCA for dimensionality reduction
+    2. K-means clustering for pattern recognition
+    3. Isolation Forest for anomaly detection
+    4. 24-hour price change
+    5. Ensemble scoring combining all methods
+    """
     try:
         if df is None:
             return 0.0
@@ -262,7 +277,7 @@ def calculate_trend_score(df):
         return 0.0
 
 def process_symbol(client, symbol, interval=Client.KLINE_INTERVAL_1DAY, lookback=7):
-    #Process a single symbol with enhanced trend detection
+    """Process a single symbol with enhanced trend detection"""
     try:
         # Get cached klines
         klines = get_cached_klines(client, symbol, interval, lookback)
@@ -314,7 +329,7 @@ def process_symbol(client, symbol, interval=Client.KLINE_INTERVAL_1DAY, lookback
         return None
 
 def get_trending_assets(client, max_assets=5):
-    #Identify trending assets using parallel processing and advanced scoring
+    """Identify trending assets using parallel processing and advanced scoring"""
     logging.info("Identifying trending assets...")
     
     # Get all USDT pairs
@@ -354,9 +369,9 @@ def get_trending_assets(client, max_assets=5):
     else:
         logging.warning("No valid trend scores calculated")
         return []
-"""
+
 def print_trading_status():
-    #Print current orders and trade reports with formatting.
+    """Print current orders and trade reports with formatting."""
     # Clear some space before printing
     print("\n\n")
     
@@ -397,13 +412,13 @@ def print_trading_status():
 file_lock = threading.Lock()
 
 def save_trade_to_csv(trade_data: dict) -> None:
-    #Save trade data to CSV file in a thread-safe manner.
+    """Save trade data to CSV file in a thread-safe manner."""
     try:
         # Create trades directory if it doesn't exist
         os.makedirs('trades', exist_ok=True)
         
         # Define CSV file path
-        csv_file = 'trades/trade_history_picky.csv'
+        csv_file = 'trades/trade_history_unpicked.csv'
         
         # Convert trade data to DataFrame
         trade_df = pd.DataFrame([trade_data])
@@ -450,11 +465,6 @@ def BTC_trend_identification(client):
         return 'up'
     else:
         return 'down'
-
-# Global signal pool and lock for best trade selection
-signal_pool = []
-signal_pool_lock = threading.Lock()
-trade_in_progress = threading.Event()
 
 class ForwardIchimokuTrader:
     def __init__(self, symbol: str, interval: str, lookback: int,
@@ -507,10 +517,10 @@ class ForwardIchimokuTrader:
         try:
             server_time = self.client.get_server_time()
             server_time_ms = server_time['serverTime']
-            return pd.to_datetime(server_time_ms, unit='ms', utc=True)
+            return pd.to_datetime(server_time_ms, unit='ms')
         except Exception as e:
             self.logger.error(f"Failed to get server time: {e}")
-            return datetime.now(UTC)
+            return datetime.utcnow()
     def _fetch_HTF_data(self, limit=100) -> pd.DataFrame:
         self.logger.debug(f"Fetching latest {limit} HFT klines for {self.symbol}...")
         try:
@@ -530,7 +540,7 @@ class ForwardIchimokuTrader:
                 self.logger.warning("NaN values in HFT OHLC data after conversion.")
                 data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
 
-            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms', utc=True)
+            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
             data.set_index('Datetime', inplace=True)
             df_HTF = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
 
@@ -619,7 +629,7 @@ class ForwardIchimokuTrader:
                 self.logger.warning("NaN values in LTF OHLC data after conversion.")
                 data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
 
-            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms', utc=True)
+            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
             data.set_index('Datetime', inplace=True)
             df_LTF = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
 
@@ -741,7 +751,7 @@ class ForwardIchimokuTrader:
                 self.logger.warning("NaN values found in OHLC data after numeric conversion during initial fetch.")
                 data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
 
-            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms', utc=True)
+            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
             data.set_index('Datetime', inplace=True)
             self.df = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
             
@@ -778,7 +788,7 @@ class ForwardIchimokuTrader:
 
             latest_kline = klines[-1]
             close_time_ms = latest_kline[6]
-            latest_dt = pd.to_datetime(close_time_ms, unit='ms', utc=True)
+            latest_dt = pd.to_datetime(close_time_ms, unit='ms')
 
             if self.df.empty or latest_dt <= self.df.index[-1]:
                 return False
@@ -860,6 +870,7 @@ class ForwardIchimokuTrader:
 
             if len(self.df) >= 15:
                 self.df['atr'] = ta.atr(self.df['High'], self.df['Low'], self.df['Close'], length=14)
+                self.df['adx'] = ta.adx(self.df['High'], self.df['Low'], self.df['Close'], length=14)
                 self.df['choppy'] = ta.chop(self.df['High'],self.df['Low'],self.df['Close'])
                 psar = ta.psar(self.df['High'],self.df['Low'],self.df['Close'])
                 
@@ -944,6 +955,7 @@ class ForwardIchimokuTrader:
         choppy = last['choppy']
         psar_long = last['PSAR_Long']
         psar_short = last['PSAR_Short']
+        adx=last['adx']
 
         
         if isinstance(psar_long, pd.Series):
@@ -964,20 +976,8 @@ class ForwardIchimokuTrader:
 
         
 
-        buy_signal = (
-            (current_close > close_t_minus_26)
-            and (conversion_line > base_line)
-            and (leading_Span_A > leading_Span_B)
-            and (current_close > leading_Span_A_shifted)
-            and (not(pd.isna(psar_long)))
-        )
-        print(psar_long)
-        sell_signal =( 
-                (current_close < close_t_minus_26) 
-                    and (conversion_line < base_line) 
-                    and (leading_Span_B > leading_Span_A) 
-                    and (current_close < leading_Span_A_shifted)  
-                    and (not(pd.isna(psar_short))))
+        buy_signal = (current_close > close_t_minus_26) and (conversion_line >= base_line) and (leading_Span_A > leading_Span_B) and (current_close > leading_Span_A_shifted)  and (psar_long < current_close) and (adx > adx_limit[self.symbol])
+        sell_signal = (current_close < close_t_minus_26) and (conversion_line <= base_line) and (leading_Span_B > leading_Span_A) and (current_close < leading_Span_A_shifted)  and (psar_short > current_close) and (adx > adx_limit[self.symbol])
         
         
         self.logger.debug(f"15min. Signals @ {last_index_name}: Buy={buy_signal}, Sell={sell_signal}")
@@ -994,6 +994,11 @@ class ForwardIchimokuTrader:
             current_price_low = last_row['Low']
             current_price = last_row['Close']
             atr = last_row['atr']
+            """print(current_price)
+            print(current_price_high)
+            print(current_price_low)"""#for debugging purpose
+            
+            
         except (IndexError, KeyError) as e:
             self.logger.error(f"Error accessing data in _manage_position: {e}")
             return
@@ -1002,68 +1007,47 @@ class ForwardIchimokuTrader:
             self.logger.warning(f"Invalid price ({current_price}) or ATR ({atr}) at {last_row.name}. Skipping.")
             return
 
-        # Only one trade allowed at a time
-        if trade_in_progress.is_set():
-            # If this instance has the open position, manage it
-            if self.position != 0:
-                self._manage_open_position(current_price, current_price_high, current_price_low, atr)
-            return
-
-        # If no trade in progress, collect signals
-        if self.position == 0:
-            buy_signal, sell_signal = self._check_signals()
-            buy_cond_LFT, sell_cond_LFT = self._check_LTF_confirmation('buy'), self._check_LTF_confirmation('sell')
-            buy_cond_HTF, sell_cond_HTF = self._check_HTF_confirmation('buy'), self._check_HTF_confirmation('sell')
-            trend = BTC_trend_identification(self.client)
-            choppy = last_row['choppy'] if 'choppy' in last_row else None
-            # Only collect valid signals
-            if buy_signal and buy_cond_LFT and buy_cond_HTF and trend == 'up':
-                self._submit_signal('buy', current_price, atr, choppy)
-            elif sell_signal and sell_cond_LFT and sell_cond_HTF and trend == 'down':
-                self._submit_signal('sell', current_price, atr, choppy)
-
-    def _manage_open_position(self, current_price, current_price_high, current_price_low, atr):
         if self.position == 1:
             if self.tp_level is None or self.sl_level is None or self.highest_price_since_entry is None:
-                self.logger.error(f"Inconsistent state for long position @ {self.df.index[-1]}. Resetting.")
+                self.logger.error(f"Inconsistent state for long position @ {last_row.name}. Resetting.")
                 self._reset_position_state()
-                trade_in_progress.clear()
                 return
-            # Check if the trade has lasted more than an hour
-            if 'entry_time' in orders.columns and self.order_id in orders.index:
-                entry_time = orders.loc[self.order_id, 'entry_time']
-                if isinstance(entry_time, pd.Timestamp):
-                    entry_time = entry_time.to_pydatetime()
-                if entry_time is not None and (datetime.now(UTC) - entry_time).total_seconds() >= 3600:
-                    self.logger.info('trade exited because it lasted more than 1 hour')
-                    self._close_position(self.df['Close'].iloc[-1], 'trade lasted more than an hour')
-                
-
             self.highest_price_since_entry = max(self.highest_price_since_entry, current_price)
             self.sl_level = self.highest_price_since_entry - (multiplier_set[self.symbol][1] * atr)
-            orders.loc[self.order_id, 'sl_price'] = self.sl_level
+            orders.loc[self.order_id, 'sl_price'] = self.sl_level # Update SL in orders DataFrame
+
             if current_price_high >= self.tp_level:
                 self._close_position(self.tp_level, f"Take Profit hit at {self.tp_level:.4f}")
-                trade_in_progress.clear()
             elif current_price_low <= self.sl_level:
                 self._close_position(self.sl_level, f"Stop Loss hit at {self.sl_level:.4f}")
-                trade_in_progress.clear()
         elif self.position == -1:
             if self.tp_level is None or self.sl_level is None or self.lowest_price_since_entry is None:
-                self.logger.error(f"Inconsistent state for short position @ {self.df.index[-1]}. Resetting.")
+                self.logger.error(f"Inconsistent state for short position @ {last_row.name}. Resetting.")
                 self._reset_position_state()
-                trade_in_progress.clear()
                 return
             self.lowest_price_since_entry = min(self.lowest_price_since_entry, current_price)
             self.sl_level = self.lowest_price_since_entry + (multiplier_set[self.symbol][1] * atr)
-            orders.loc[self.order_id, 'sl_price'] = self.sl_level
+            orders.loc[self.order_id, 'sl_price'] = self.sl_level # Update SL in orders DataFrame
+            
+            
             if current_price_low <= self.tp_level:
                 self._close_position(self.tp_level, f"Take Profit hit at {self.tp_level:.4f}")
-                trade_in_progress.clear()
             elif current_price >= self.sl_level:
                 self._close_position(self.sl_level, f"Stop Loss hit at {self.sl_level:.4f}")
-                trade_in_progress.clear()
 
+        if self.position == 0:
+            buy_signal, sell_signal = self._check_signals()
+            buy_cond_LFT,sell_cond_LFT = self._check_LTF_confirmation('buy'),self._check_LTF_confirmation('sell')
+            buy_cond_HTF,sell_cond_HTF = self._check_HTF_confirmation('buy'),self._check_HTF_confirmation('sell')
+            self.logger.debug(f"Entry check: Buy signal={buy_signal}, Sell signal={sell_signal}")
+            trend=BTC_trend_identification(self.client)
+            if buy_signal:
+                
+                    self._enter_position(1, current_price, atr)
+            elif sell_signal :
+                
+                    self._enter_position(-1, current_price, atr)
+                    
     def _enter_position(self, direction: int, entry_price: float, atr: float) -> None:
         global orders # Needed because we assign to the global 'orders' variable via pd.concat
 
@@ -1119,7 +1103,7 @@ class ForwardIchimokuTrader:
                 return
 
             # Create new order data as a dictionary
-            entry_time_now = datetime.now(UTC)
+            entry_time_now = datetime.utcnow()
             self.entry_time = entry_time_now
             new_order_data = {
                 'entry_time': entry_time_now,
@@ -1179,7 +1163,7 @@ class ForwardIchimokuTrader:
         self.simulated_balance = balance_after_gross_pnl - exit_cost
         balance_change = self.simulated_balance - balance_before_close
 
-        exit_time = datetime.now(UTC)
+        exit_time = datetime.utcnow()
         closed_direction = 'LONG' if self.position == 1 else 'SHORT'
 
         # --- Prepare trade data for CSV ---
@@ -1244,7 +1228,7 @@ class ForwardIchimokuTrader:
 
         # Reset position state
         self._reset_position_state()
-        self.last_trade_time = datetime.now(UTC)
+        self.last_trade_time = datetime.utcnow()
 
     def _reset_position_state(self):
         self.logger.debug("Resetting position state.")
@@ -1254,38 +1238,6 @@ class ForwardIchimokuTrader:
         self.sl_level = None
         self.highest_price_since_entry = None
         self.lowest_price_since_entry = None
-
-    def _submit_signal(self, direction, price, atr, choppy):
-        # Submit signal to the global pool
-        signal = {
-            'symbol': self.symbol,
-            'direction': direction,
-            'price': price,
-            'atr': atr,
-            'choppy': choppy,
-            'trader': self,
-            'tp_to_sl_ratio': multiplier_set[self.symbol][0] / multiplier_set[self.symbol][1]
-        }
-        with signal_pool_lock:
-            signal_pool.append(signal)
-
-    @staticmethod
-    def pick_and_execute_best_trade():
-        # Called periodically or after all signals are collected
-        with signal_pool_lock:
-            if not signal_pool or trade_in_progress.is_set():
-                signal_pool.clear()
-                return
-            # Pick the signal with lowest choppy, then highest ATR
-            best_signal = min(signal_pool, key=lambda s: (s['choppy'], -s['atr'], -s['tp_to_sl_ratio']))#it is better to give them weight 
-            signal_pool.clear()
-        trader = best_signal['trader']
-        if trader.position == 0:
-            if best_signal['direction'] == 'buy':
-                trader._enter_position(1, best_signal['price'], best_signal['atr'])
-            elif best_signal['direction'] == 'sell':
-                trader._enter_position(-1, best_signal['price'], best_signal['atr'])
-            trade_in_progress.set()
 
     def run(self) -> None:
         self.logger.info(f"Starting trader for {self.symbol}")
@@ -1317,7 +1269,7 @@ class ForwardIchimokuTrader:
                         continue
 
                 # Use the last candle's timestamp (self.df.index[-1]) instead of [-2]
-                last_candle_time_utc = self.df.index[-1]
+                last_candle_time_utc = self.df.index[-1].tz_localize(None)
                 self.logger.debug(f"Last candle time: {last_candle_time_utc}, Server time: {server_now}")
 
                 # Calculate next candle time
@@ -1382,13 +1334,12 @@ if __name__ == "__main__":
         client = Client(API_KEY, API_SECRET)
         
         # Get trending assets
-        #trending_assets = get_trending_assets(client, MAX_TRENDING_ASSETS)
+        trending_assets = get_trending_assets(client, MAX_TRENDING_ASSETS)
         
         # Combine specified and trending assets
-        all_assets = list(set(ASSETS ))  # Using set to remove any duplicates. if we activate the trending asset thing trending asset should be added to ASSETS
+        all_assets = list(set(ASSETS + trending_assets))  # Using set to remove any duplicates
         
         threads = []
-        traders = []
         for asset in all_assets:
             try:
                 trader = ForwardIchimokuTrader(
@@ -1401,7 +1352,6 @@ if __name__ == "__main__":
                     tc=TC,
                     initial_balance=SIMULATED_INITIAL_BALANCE
                 )
-                traders.append(trader)
                 thread = threading.Thread(target=trader.run)
                 threads.append(thread)
                 thread.start()
@@ -1409,14 +1359,6 @@ if __name__ == "__main__":
             except Exception as e:
                 logging.critical(f"Failed to initialize trader for {asset}: {e}", exc_info=True)
 
-        # Add a thread to periodically pick and execute the best trade
-        def trade_picker_loop():
-            while True:
-                ForwardIchimokuTrader.pick_and_execute_best_trade()
-                time.sleep(5)  # Check every 5 seconds
-
-        picker_thread = threading.Thread(target=trade_picker_loop, daemon=True)
-        picker_thread.start()
-
+        # Optionally wait for all threads to finish (though they run indefinitely unless stopped)
         for thread in threads:
             thread.join()
