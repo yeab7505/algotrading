@@ -9,7 +9,7 @@ def main() -> None:
 		sys.path.insert(0, project_root)
 
 	# Resolve the path to the target script with a space in the filename
-	script_path = os.path.join(project_root, "ichimoku testnet.py")
+	script_path = os.path.join(project_root, "ichimoku live.py")
 	if not os.path.exists(script_path):
 		sys.stderr.write(f"Start error: script not found at {script_path}\n")
 		sys.exit(1)
