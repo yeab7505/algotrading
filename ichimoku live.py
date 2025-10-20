@@ -441,185 +441,7 @@ class ForwardIchimokuTrader:
         except Exception as e:
             self.logger.error(f"Failed to get server time: {e}")
             return datetime.now(UTC)  # Return timezone-aware datetime
-    def _fetch_HTF_data(self, limit=100) -> pd.DataFrame:
-        self.logger.debug(f"Fetching latest {limit} HFT klines for {self.symbol}...")
-        try:
-            klines = self.client.futures_klines(symbol=self.symbol, interval=self.interval_HTF, limit=limit)
-            if not klines:
-                self.logger.warning("Could not fetch HFT klines (empty list).")
-                return None
-
-            cols = ['Open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time']
-            data = pd.DataFrame(klines, columns=cols + ['Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
-            data = data[cols]
-
-            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                data[col] = pd.to_numeric(data[col], errors='coerce')
-
-            if data[['Open', 'High', 'Low', 'Close']].isnull().any().any():
-                self.logger.warning("NaN values in HFT OHLC data after conversion.")
-                data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
-
-            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
-            data.set_index('Datetime', inplace=True)
-            df_HTF = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-
-            if len(df_HTF) < 27:
-                self.logger.warning(f"Insufficient HFT data fetched ({len(df_HTF)} rows). Need at least 27.")
-                return None
-
-            return df_HTF
-        except Exception as e:
-            self.logger.error(f"Error fetching HFT data: {e}", exc_info=True)
-            return None
-    def _calculate_HTF_indicators(self, df_HTF: pd.DataFrame) -> pd.DataFrame:
-        if df_HTF is None or len(df_HTF) < 52:
-            self.logger.warning("Insufficient data for HFT Ichimoku calculation.")
-            return None
-
-        try:
-            ichimoku_data = ta.ichimoku(df_HTF['High'], df_HTF['Low'], df_HTF['Close'])
-            if ichimoku_data is None or not isinstance(ichimoku_data, tuple) or len(ichimoku_data) < 1 or ichimoku_data[0].empty:
-                self.logger.warning("HFT Ichimoku calculation returned unexpected/empty data.")
-                return None
-
-            temp_df_ichi_HTF = ichimoku_data[0].rename(columns={
-                'ISA_9': 'leading Span A', 'ISB_26': 'leading Span B',
-                'ITS_9': 'conversion line', 'IKS_26': 'base line',
-                'ICS_26': 'lagging Span'
-            })
-            temp_df_ichi_HTF.index = df_HTF.index[-len(temp_df_ichi_HTF):]
-            df_HTF = df_HTF.join(temp_df_ichi_HTF)
-            return df_HTF
-        except Exception as e:
-            self.logger.error(f"Error calculating HFT indicators: {e}", exc_info=True)
-            return None
-
-    def _check_HTF_confirmation(self, direction: str) -> bool:
-        df_HTF = self._fetch_HTF_data(limit=100)
-        if df_HTF is None:
-            return False
-
-        df_HTF = self._calculate_HTF_indicators(df_HTF)
-        if df_HTF is None:
-            return False
-
-        if len(df_HTF) < 27:
-            self.logger.warning("Not enough HTF data for signal check.")
-            return False
-
-        last_HTF = df_HTF.iloc[-1]
-        close_t_minus_26_5m = df_HTF['Close'].iloc[-27]
-        current_close = df_HTF['Close'].iloc[-1]
-        leading_span_A_shifted = df_HTF['leading Span A'].iloc[-26]
-
-        if pd.isna(close_t_minus_26_5m) or last_HTF[['Close', 'conversion line', 'base line']].isnull().any():
-            self.logger.warning("NaN values in HTF data for signal check.")
-            return False
-
-        buy_cond_HTF =  (last_HTF['conversion line'] > last_HTF['base line']  and (current_close > leading_span_A_shifted))
-        sell_cond_HTF = (last_HTF['conversion line'] < last_HTF['base line'] and  (current_close < leading_span_A_shifted))
-
-        if direction == 'buy':
-            self.logger.debug(f"HTF Buy confirmation: {buy_cond_HTF}")
-            return buy_cond_HTF
-        elif direction == 'sell':
-            self.logger.debug(f"HTF Sell confirmation: {sell_cond_HTF}")
-            return sell_cond_HTF
-        else:
-            self.logger.error(f"Invalid direction {direction} in _check_HTF_confirmation.")
-            return False
     
-    def _fetch_LTF_data(self, limit=100) -> pd.DataFrame:
-        self.logger.debug(f"Fetching latest {limit} LTF klines for {self.symbol}...")
-        try:
-            klines = self.client.futures_klines(symbol=self.symbol, interval=self.interval_LTF, limit=limit)
-            if not klines:
-                self.logger.warning("Could not fetch LTF klines (empty list).")
-                return None
-
-            cols = ['Open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time']
-            data = pd.DataFrame(klines, columns=cols + ['Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
-            data = data[cols]
-
-            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                data[col] = pd.to_numeric(data[col], errors='coerce')
-
-            if data[['Open', 'High', 'Low', 'Close']].isnull().any().any():
-                self.logger.warning("NaN values in LTF OHLC data after conversion.")
-                data.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
-
-            data['Datetime'] = pd.to_datetime(data['Close_time'], unit='ms')
-            data.set_index('Datetime', inplace=True)
-            df_LTF = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-
-            if len(df_LTF) < 27:
-                self.logger.warning(f"Insufficient LTF data fetched ({len(df_LTF)} rows). Need at least 27.")
-                return None
-
-            return df_LTF
-        except Exception as e:
-            self.logger.error(f"Error fetching LTF data: {e}", exc_info=True)
-            return None
-
-    def _calculate_LTF_indicators(self, df_LTF: pd.DataFrame) -> pd.DataFrame:
-        if df_LTF is None or len(df_LTF) < 52:
-            self.logger.warning("Insufficient data for LTF Ichimoku calculation.")
-            return None
-
-        try:
-            ichimoku_data = ta.ichimoku(df_LTF['High'], df_LTF['Low'], df_LTF['Close'])
-            if ichimoku_data is None or not isinstance(ichimoku_data, tuple) or len(ichimoku_data) < 1 or ichimoku_data[0].empty:
-                self.logger.warning("LTF Ichimoku calculation returned unexpected/empty data.")
-                return None
-
-            temp_df_ichi = ichimoku_data[0].rename(columns={
-                'ISA_9': 'leading Span A', 'ISB_26': 'leading Span B',
-                'ITS_9': 'conversion line', 'IKS_26': 'base line',
-                'ICS_26': 'lagging Span'
-            })
-            temp_df_ichi.index = df_LTF.index[-len(temp_df_ichi):]
-            df_LTF = df_LTF.join(temp_df_ichi)
-            return df_LTF
-        except Exception as e:
-            self.logger.error(f"Error calculating 5m indicators: {e}", exc_info=True)
-            return None
-
-    def _check_LTF_confirmation(self, direction: str) -> bool:
-        df_LTF = self._fetch_LTF_data(limit=100)
-        if df_LTF is None:
-            return False
-
-        df_LTF = self._calculate_LTF_indicators(df_LTF)
-        if df_LTF is None:
-            return False
-
-        if len(df_LTF) < 27:
-            self.logger.warning("Not enough LTF data for signal check.")
-            return False
-
-        last_LTF = df_LTF.iloc[-1]
-        close_t_minus_26_5m = df_LTF['Close'].iloc[-27]
-        current_close = df_LTF['Close'].iloc[-1]
-        leading_span_A_shifted=df_LTF['leading Span A'].iloc[-26]
-        
-        if pd.isna(close_t_minus_26_5m) or last_LTF[['Close', 'conversion line', 'base line']].isnull().any():
-            self.logger.warning("NaN values in 5m data for signal check.")
-            return False
-
-        buy_cond_LTF =  (last_LTF['conversion line'] > last_LTF['base line']  and (current_close > leading_span_A_shifted))
-        sell_cond_LTF = (last_LTF['conversion line'] < last_LTF['base line'] and  (current_close < leading_span_A_shifted))
-
-        if direction == 'buy':
-            self.logger.debug(f"5m Buy confirmation: {buy_cond_LTF}")
-            return buy_cond_LTF
-        elif direction == 'sell':
-            self.logger.debug(f"5m Sell confirmation: {sell_cond_LTF}")
-            return sell_cond_LTF
-        else:
-            self.logger.error(f"Invalid direction {direction} in _check_5m_confirmation.")
-            return False
-        
     def _fetch_initial_data(self) -> bool:
         self.logger.info(f"Fetching initial {self.lookback + 50} klines for {self.symbol}...")
         try:
@@ -878,6 +700,7 @@ class ForwardIchimokuTrader:
             and (current_close > leading_Span_A_shifted)
             and future_kumo_bullish  # Add future Kumo check
             and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
+            
             and adx < adx_limit[self.symbol]
             
         )
@@ -887,7 +710,8 @@ class ForwardIchimokuTrader:
             
             and (current_close < leading_Span_A_shifted)
             and future_kumo_bearish  # Add future Kumo check
-            and (not(pd.isna(psar_short)))  # Only checks if PSAR exists, not its value
+            and (not(pd.isna(psar_short)))
+              # Only checks if PSAR exists, not its value
             and adx < adx_limit[self.symbol]
         )
 
@@ -910,18 +734,44 @@ class ForwardIchimokuTrader:
             self.logger.debug(f"Current position state: {self.position}, entry_price: {self.entry_price}, position_size: {self.position_size}")
             hit_detected_via_orders = False
             for order in symbol_orders:
-                if order['status'] == 'FILLED':
-                    if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
-                        # Check if we've already processed this order
-                        order_id = order['orderId']
-                        if order_id in self.processed_orders:
-                            continue
-                        
-                        self.logger.info(f"Successfully detected {order['type']} order {order_id} for {self.symbol} - processing trade closure")
-                        self.processed_orders.add(order_id)
-                        hit_detected_via_orders = True
-                        # Create trade report entry for TP/SL hit
-                        exit_price = float(order['avgPrice']) if order['avgPrice'] else float(order['price'])
+                try:
+                    order_type = order.get('type')
+                    order_status = order.get('status')
+                    order_id = order.get('orderId')
+                    is_reduce_only = bool(order.get('reduceOnly', False))
+                except Exception:
+                    # Skip malformed orders
+                    continue
+
+                # Only consider filled reduce-only TP/SL orders
+                if (
+                    order_status == 'FILLED' and
+                    order_type in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT'] and
+                    is_reduce_only
+                ):
+                    # Check if we've already processed this order
+                    if order_id in self.processed_orders:
+                        continue
+                    
+                    self.logger.info(f"Detected FILLED {order_type} (reduce-only) order {order_id} for {self.symbol} - processing trade closure")
+                    self.processed_orders.add(order_id)
+                    hit_detected_via_orders = True
+                    
+                    # Derive a reliable exit price
+                    exit_price = 0.0
+                    avg_price_str = order.get('avgPrice')
+                    price_str = order.get('price')
+                    stop_price_str = order.get('stopPrice') if 'stopPrice' in order else None
+                    try:
+                        if avg_price_str and float(avg_price_str) > 0:
+                            exit_price = float(avg_price_str)
+                        elif price_str and float(price_str) > 0:
+                            exit_price = float(price_str)
+                        elif stop_price_str and float(stop_price_str) > 0:
+                            exit_price = float(stop_price_str)
+                    except Exception:
+                        # Fall back quietly; will remain 0.0 if not derivable
+                        pass
                         
                         # Determine original position side based on current position state
                         # Use the actual position side from the trader's state
@@ -968,7 +818,7 @@ class ForwardIchimokuTrader:
                         global tradereport
                         with orders_lock:
                             tradereport = pd.concat([tradereport, pd.DataFrame([trade_data])], ignore_index=True)
-                        self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order['type']} at {trade_data['exit_price']}, profit: {trade_data['profit']}")
+                        self.logger.info(f"TP/SL hit recorded for {self.symbol}: {order_type} at {trade_data['exit_price']}, profit: {trade_data['profit']}")
                         self.logger.info(f"Trade data added: {trade_data}")
                         try:
                             if 'telegram_reporter' in globals() and telegram_reporter:
@@ -1042,6 +892,10 @@ class ForwardIchimokuTrader:
                             exit_price = self.sl_level
 
                     if exit_reason is not None and exit_price is not None:
+                        # Extra visibility for price-cross path
+                        self.logger.info(
+                            f"Price-cross {exit_reason} for {self.symbol}: last_high={last_high}, last_low={last_low}, tp={self.tp_level}, sl={self.sl_level}, exit={exit_price}"
+                        )
                         # Record as a price-cross detected closure   
                         if self.position_size > 0:
                             if original_position_side == 'BUY':
@@ -1172,12 +1026,8 @@ class ForwardIchimokuTrader:
                 last_row = self.df.iloc[-1]
                 current_price = last_row['Close']
                 atr = last_row['atr']
-                hft_buy = self._check_HTF_confirmation('buy')
-                hft_sell = self._check_HTF_confirmation('sell')
-                ltf_buy = self._check_LTF_confirmation('buy')
-                ltf_sell = self._check_LTF_confirmation('sell')
                 buy_signal, sell_signal = self._check_signals()
-                self.logger.info(f"Signal check for {self.symbol}: HTF_buy={hft_buy}, LTF_buy={ltf_buy}, buy_signal={buy_signal}, HTF_sell={hft_sell}, LTF_sell={ltf_sell}, sell_signal={sell_signal}")
+                self.logger.info(f"Signal check for {self.symbol}:  buy_signal={buy_signal},  sell_signal={sell_signal}")
                 if buy_signal:
                     self.logger.info(f"Submitting BUY signal for {self.symbol}")
                     self._submit_signal('buy', current_price, atr, last_row['choppy'])
