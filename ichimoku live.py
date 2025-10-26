@@ -391,7 +391,7 @@ class ForwardIchimokuTrader:
 
         # Initialize Gemini AI analyzer for consolidation detection
         try:
-            self.gemini = GeminiMarketAnalyzer()
+            self.gemini = GeminiMarketAnalyzer(api_key='AIzaSyAdyo9u1iFoyoqSXCG3h38ADtuZHmc85vg')
             self.logger.info("Gemini AI analyzer initialized successfully")
         except Exception as e:
             self.logger.warning(f"Failed to initialize Gemini AI: {e}")
