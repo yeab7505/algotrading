@@ -15,6 +15,7 @@ from decimal import Decimal
 import requests
 import json
 from telegram_reporter import setup_telegram_logging_from_env, TelegramReporter
+from gemini_market_analyzer import GeminiMarketAnalyzer
 
 
  
@@ -388,6 +389,14 @@ class ForwardIchimokuTrader:
         self.logger = logging.getLogger(f"{self.__class__.__name__}_{symbol}")
         self.logger.info("Initializing Trader...")
 
+        # Initialize Gemini AI analyzer for consolidation detection
+        try:
+            self.gemini = GeminiMarketAnalyzer()
+            self.logger.info("Gemini AI analyzer initialized successfully")
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize Gemini AI: {e}")
+            self.gemini = None
+
         try:
             self.client = create_binance_client_with_failover(API_KEY, API_SECRET)
             # Test futures endpoint specifically
@@ -715,6 +724,29 @@ class ForwardIchimokuTrader:
             and adx < adx_limit[self.symbol]
         )
 
+        # Gemini AI consolidation check - blocks trades in choppy markets
+        if buy_signal or sell_signal:
+            try:
+                if hasattr(self, 'gemini') and self.gemini is not None:
+                    is_consolidating, reasoning = self.gemini.analyze_consolidation(
+                        df=self.df,
+                        symbol=self.symbol
+                    )
+                    
+                    if is_consolidating:
+                        self.logger.warning(
+                            f"🧠 Gemini detected consolidation for {self.symbol}: {reasoning}. "
+                            f"Trade BLOCKED despite signal."
+                        )
+                        return False, False
+                    else:
+                        self.logger.info(
+                            f"🧠 Gemini confirmed trending market for {self.symbol}: {reasoning}. "
+                            f"Trade ALLOWED."
+                        )
+            except Exception as e:
+                self.logger.error(f"Error in Gemini check for {self.symbol}: {e}")
+                # Continue with original signals if Gemini check fails
 
         self.logger.debug(f"15min. Signals @ {last_index_name}: Buy={buy_signal}, Sell={sell_signal}")
         self.logger.debug(f"Signal components - Close: {current_close:.4f}, T-26: {close_t_minus_26:.4f}, Conv: {conversion_line:.4f}, Base: {base_line:.4f}")
