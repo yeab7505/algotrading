@@ -759,19 +759,19 @@ class ForwardIchimokuTrader:
                             f"Trade ALLOWED."
                         )
                         # Optional: Send Telegram notification about allowed trade
-                        # Uncomment if you want to be notified of all Gemini decisions
-                        # try:
-                        #     if 'telegram_reporter' in globals() and telegram_reporter:
-                        #         signal_type = "BUY" if buy_signal else "SELL"
-                        #         price = self.df['Close'].iloc[-1]
-                        #         telegram_reporter.send(
-                        #             f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
-                        #             f"Signal: {signal_type} @ ${price:.4f}\n"
-                        #             f"Status: Market is trending\n"
-                        #             f"💡 {reasoning}"
-                        #         )
-                        # except Exception as e:
-                        #     self.logger.error(f"Failed to send Telegram notification: {e}")
+                         #Uncomment if you want to be notified of all Gemini decisions
+                         try:
+                             if 'telegram_reporter' in globals() and telegram_reporter:
+                                 signal_type = "BUY" if buy_signal else "SELL"
+                                 price = self.df['Close'].iloc[-1]
+                                 telegram_reporter.send(
+                                     f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
+                                     f"Signal: {signal_type} @ ${price:.4f}\n"
+                                     f"Status: Market is trending\n"
+                                     f"💡 {reasoning}"
+                                 )
+                         except Exception as e:
+                             self.logger.error(f"Failed to send Telegram notification: {e}")
             except Exception as e:
                 self.logger.error(f"Error in Gemini check for {self.symbol}: {e}")
                 # Continue with original signals if Gemini check fails
