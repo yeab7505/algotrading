@@ -40,12 +40,12 @@ class GeminiMarketAnalyzer:
             genai.configure(api_key=self.api_key)
             # Use the latest Gemini 2.5 models (Flash is faster and cheaper)
             try:
-                self.client = genai.GenerativeModel('gemini-2.5-pro')
+                self.client = genai.GenerativeModel('gemini-2.5-flash')
                 logger.info("Gemini AI initialized successfully with gemini-2.5-pro")
             except Exception as e:
                 logger.warning(f"Failed to initialize gemini-2.5-pro: {e}, trying gemini-2.5-flash...")
                 try:
-                    self.client = genai.GenerativeModel('gemini-2.5-flash')
+                    self.client = genai.GenerativeModel('gemini-2.5-pro')
                     logger.info("Gemini AI initialized successfully with gemini-2.5-flash")
                 except Exception as e2:
                     logger.warning(f"Failed to initialize gemini-2.5-pro: {e2}, trying gemini-1.5-flash")
