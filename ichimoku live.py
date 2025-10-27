@@ -154,6 +154,115 @@ signal_pool = []
 signal_pool_lock = threading.Lock()
 trade_in_progress = threading.Event()
 
+# Global Gemini analysis queue for batching API calls
+gemini_analysis_queue = []
+gemini_queue_lock = threading.Lock()
+gemini_last_batch_time = None
+gemini_batch_interval = 30  # Process queue every 30 seconds
+gemini_results_cache = {}  # Cache to store results by (symbol, df_hash)
+
+def get_df_hash(df):
+    """Get a simple hash of the dataframe to identify if it's changed"""
+    return hash(str(df.index[-1]) + str(df['Close'].iloc[-1]))
+
+def add_to_gemini_queue(trader, df, signal_type, callback_func, *callback_args):
+    """Add a Gemini analysis request to the queue instead of calling immediately"""
+    global gemini_analysis_queue
+    
+    with gemini_queue_lock:
+        gemini_analysis_queue.append({
+            'trader': trader,
+            'df': df,
+            'symbol': trader.symbol,
+            'signal_type': signal_type,
+            'callback': callback_func,
+            'callback_args': callback_args,
+            'timestamp': datetime.now(UTC)
+        })
+        logging.debug(f"Added {trader.symbol} to Gemini queue. Queue size: {len(gemini_analysis_queue)}")
+
+def process_gemini_queue():
+    """Process the Gemini analysis queue in batches to save API calls"""
+    global gemini_analysis_queue, gemini_last_batch_time, gemini_batch_interval
+    
+    try:
+        with gemini_queue_lock:
+            if not gemini_analysis_queue:
+                return
+            
+            # Check if enough time has passed or queue is full
+            now = datetime.now(UTC)
+            time_since_last_batch = (now - gemini_last_batch_time).total_seconds() if gemini_last_batch_time else float('inf')
+            
+            # Process if interval passed or queue has 2+ items
+            if time_since_last_batch >= gemini_batch_interval or len(gemini_analysis_queue) >= 2:
+                pending_analyses = gemini_analysis_queue.copy()
+                gemini_analysis_queue.clear()
+                gemini_last_batch_time = now
+            else:
+                return
+        
+        # Group by trader (should only have one per trader, but safe to group)
+        trader_batches = {}
+        for item in pending_analyses:
+            trader = item['trader']
+            if trader not in trader_batches:
+                trader_batches[trader] = []
+            trader_batches[trader].append(item)
+        
+        # Get the first trader that has a gemini client
+        processing_trader = None
+        for trader in trader_batches.keys():
+            if hasattr(trader, 'gemini') and trader.gemini is not None:
+                processing_trader = trader
+                break
+        
+        if not processing_trader or not hasattr(processing_trader, 'gemini') or processing_trader.gemini is None:
+            logging.warning("No trader with Gemini client available. Requeuing items.")
+            with gemini_queue_lock:
+                gemini_analysis_queue.extend(pending_analyses)
+            return
+        
+        # Prepare batch analyses for Gemini
+        batch_analyses = []
+        pending_items = []
+        
+        for item in pending_analyses:
+            batch_analyses.append({
+                'df': item['df'],
+                'symbol': item['symbol']
+            })
+            pending_items.append(item)
+        
+        if not batch_analyses:
+            return
+        
+        # Call Gemini batch analysis (ONE API call for multiple symbols)
+        logging.info(f"Processing Gemini batch for {len(batch_analyses)} symbols: {[a['symbol'] for a in batch_analyses]}")
+        try:
+            results = processing_trader.gemini.analyze_multiple_consolidations(batch_analyses)
+            
+            # Process results and call callbacks
+            for item in pending_items:
+                symbol = item['symbol']
+                if symbol in results:
+                    is_consolidating, reasoning = results[symbol]
+                    # Call the callback with the result
+                    item['callback'](is_consolidating, reasoning, item['signal_type'], *item['callback_args'])
+                else:
+                    logging.error(f"No result returned for {symbol} from batch analysis")
+                    # Default to allowing trade if analysis fails
+                    item['callback'](False, "Analysis failed - defaulting to allow", item['signal_type'], *item['callback_args'])
+                    
+        except Exception as e:
+            logging.error(f"Error in batch Gemini analysis: {e}", exc_info=True)
+            # Requeue items on error
+            with gemini_queue_lock:
+                gemini_analysis_queue.extend(pending_items)
+            
+    except Exception as e:
+        logging.error(f"Error processing Gemini queue: {e}", exc_info=True)
+
 # Trading inhibition system
 trading_inhibited = False
 inhibition_start_time = None
@@ -724,56 +833,31 @@ class ForwardIchimokuTrader:
             and adx < adx_limit[self.symbol]
         )
 
+        # Store signals for potential use in callbacks
+        self._pending_buy_signal = buy_signal
+        self._pending_sell_signal = sell_signal
+        
         # Gemini AI consolidation check - blocks trades in choppy markets
         if buy_signal or sell_signal:
             try:
                 if hasattr(self, 'gemini') and self.gemini is not None:
-                    is_consolidating, reasoning = self.gemini.analyze_consolidation(
-                        df=self.df,
-                        symbol=self.symbol
-                    )
-                    
-                    if is_consolidating:
-                        self.logger.info(
-                            f"🧠 Gemini detected consolidation for {self.symbol}: {reasoning}. "
-                            f"Trade BLOCKED despite signal."
+                    # Check if we're already waiting for a Gemini result
+                    if not hasattr(self, '_gemini_pending') or not self._gemini_pending:
+                        # Queue Gemini analysis instead of calling directly
+                        signal_type = "BUY" if buy_signal else "SELL"
+                        self._gemini_pending = True
+                        add_to_gemini_queue(
+                            trader=self,
+                            df=self.df,
+                            signal_type=signal_type,
+                            callback_func=self._handle_gemini_result,
+                            buy_signal=buy_signal,
+                            sell_signal=sell_signal
                         )
-                        # Send Telegram notification about blocked trade
-                        try:
-                            if 'telegram_reporter' in globals() and telegram_reporter:
-                                signal_type = "BUY" if buy_signal else "SELL"
-                                price = self.df['Close'].iloc[-1]
-                                telegram_reporter.send(
-                                    f"⚠️ <b>Trade Blocked</b> - <code>{self.symbol}</code>\n"
-                                    f"Signal: {signal_type} @ ${price:.4f}\n"
-                                    f"Reason: Market is consolidating\n"
-                                    f"💡 {reasoning}"
-                                )
-                        except Exception as e:
-                            self.logger.error(f"Failed to send Telegram notification: {e}")
-                        
-                        return False, False
-                    else:
-                        self.logger.info(
-                            f"🧠 Gemini confirmed trending market for {self.symbol}: {reasoning}. "
-                            f"Trade ALLOWED."
-                        )
-                        # Optional: Send Telegram notification about allowed trade
-                         #Uncomment if you want to be notified of all Gemini decisions
-                        try:
-                             if 'telegram_reporter' in globals() and telegram_reporter:
-                                 signal_type = "BUY" if buy_signal else "SELL"
-                                 price = self.df['Close'].iloc[-1]
-                                 telegram_reporter.send(
-                                     f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
-                                     f"Signal: {signal_type} @ ${price:.4f}\n"
-                                     f"Status: Market is trending\n"
-                                     f"💡 {reasoning}"
-                                 )
-                        except Exception as e:
-                             self.logger.error(f"Failed to send Telegram notification: {e}")
+                    # Return False to block signal until Gemini approves
+                    return False, False
             except Exception as e:
-                self.logger.error(f"Error in Gemini check for {self.symbol}: {e}")
+                self.logger.error(f"Error queueing Gemini check for {self.symbol}: {e}")
                 # Continue with original signals if Gemini check fails
 
         self.logger.debug(f"15min. Signals @ {last_index_name}: Buy={buy_signal}, Sell={sell_signal}")
@@ -782,6 +866,69 @@ class ForwardIchimokuTrader:
         self.logger.debug(f"Future Kumo - Span A: {str(future_span_a) if future_span_a is not None else 'None'}, Span B: {str(future_span_b) if future_span_b is not None else 'None'}")
         self.logger.debug(f"PSAR - Long: {str(psar_long) if psar_long is not None else 'None'}, Short: {str(psar_short) if psar_short is not None else 'None'}")
         return buy_signal, sell_signal
+    
+    def _handle_gemini_result(self, is_consolidating, reasoning, signal_type, buy_signal, sell_signal):
+        """Callback to handle Gemini analysis result and execute trade if approved"""
+        # Clear pending flag
+        self._gemini_pending = False
+        
+        try:
+            if is_consolidating:
+                self.logger.warning(
+                    f"🧠 Gemini detected consolidation for {self.symbol}: {reasoning}. "
+                    f"Trade BLOCKED despite signal."
+                )
+                # Send Telegram notification about blocked trade
+                try:
+                    if 'telegram_reporter' in globals() and telegram_reporter:
+                        signal_type_text = "BUY" if buy_signal else "SELL"
+                        price = self.df['Close'].iloc[-1]
+                        telegram_reporter.send(
+                            f"⚠️ <b>Trade Blocked</b> - <code>{self.symbol}</code>\n"
+                            f"Signal: {signal_type_text} @ ${price:.4f}\n"
+                            f"Reason: Market is consolidating\n"
+                            f"💡 {reasoning}"
+                        )
+                except Exception as e:
+                    self.logger.error(f"Failed to send Telegram notification: {e}")
+            else:
+                self.logger.info(
+                    f"🧠 Gemini confirmed trending market for {self.symbol}: {reasoning}. "
+                    f"Trade ALLOWED - submitting signal."
+                )
+                # Send Telegram notification about allowed trade
+                try:
+                     if 'telegram_reporter' in globals() and telegram_reporter:
+                         signal_type_text = "BUY" if buy_signal else "SELL"
+                         price = self.df['Close'].iloc[-1]
+                         telegram_reporter.send(
+                             f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
+                             f"Signal: {signal_type_text} @ ${price:.4f}\n"
+                             f"Status: Market is trending\n"
+                             f"💡 {reasoning}"
+                         )
+                except Exception as e:
+                     self.logger.error(f"Failed to send Telegram notification: {e}")
+                
+                # Get latest data and submit signal if still valid
+                try:
+                    last_row = self.df.iloc[-1]
+                    current_price = last_row['Close']
+                    atr = last_row['atr']
+                    choppy = last_row['choppy']
+                    
+                    # Submit signal directly without re-checking (avoid recursive Gemini calls)
+                    if buy_signal:
+                        self.logger.info(f"Submitting BUY signal for {self.symbol} after Gemini approval")
+                        self._submit_signal('buy', current_price, atr, choppy)
+                    elif sell_signal:
+                        self.logger.info(f"Submitting SELL signal for {self.symbol} after Gemini approval")
+                        self._submit_signal('sell', current_price, atr, choppy)
+                except Exception as e:
+                    self.logger.error(f"Error submitting signal after Gemini approval for {self.symbol}: {e}", exc_info=True)
+                    
+        except Exception as e:
+            self.logger.error(f"Error handling Gemini result for {self.symbol}: {e}", exc_info=True)
     
     def _check_tp_sl_hits(self):
         """Check for TP/SL hits and add them to trade report"""
@@ -1792,6 +1939,18 @@ if __name__ == "__main__":
 
         picker_thread = threading.Thread(target=trade_picker_loop, daemon=True)
         picker_thread.start()
+        
+        # Add a thread to periodically process Gemini analysis queue
+        def gemini_queue_processor_loop():
+            while True:
+                try:
+                    process_gemini_queue()
+                except Exception as e:
+                    logging.error(f"Error in Gemini queue processor: {e}", exc_info=True)
+                time.sleep(5)  # Check every 5 seconds
+        
+        gemini_processor_thread = threading.Thread(target=gemini_queue_processor_loop, daemon=True)
+        gemini_processor_thread.start()
         
         # News checker removed
 
