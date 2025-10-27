@@ -165,7 +165,7 @@ def get_df_hash(df):
     """Get a simple hash of the dataframe to identify if it's changed"""
     return hash(str(df.index[-1]) + str(df['Close'].iloc[-1]))
 
-def add_to_gemini_queue(trader, df, signal_type, callback_func, *callback_args):
+def add_to_gemini_queue(trader, df, signal_type, callback_func, **kwargs):
     """Add a Gemini analysis request to the queue instead of calling immediately"""
     global gemini_analysis_queue
     
@@ -176,7 +176,7 @@ def add_to_gemini_queue(trader, df, signal_type, callback_func, *callback_args):
             'symbol': trader.symbol,
             'signal_type': signal_type,
             'callback': callback_func,
-            'callback_args': callback_args,
+            'kwargs': kwargs,
             'timestamp': datetime.now(UTC)
         })
         logging.debug(f"Added {trader.symbol} to Gemini queue. Queue size: {len(gemini_analysis_queue)}")
@@ -248,11 +248,13 @@ def process_gemini_queue():
                 if symbol in results:
                     is_consolidating, reasoning = results[symbol]
                     # Call the callback with the result
-                    item['callback'](is_consolidating, reasoning, item['signal_type'], *item['callback_args'])
+                    kwargs = item.get('kwargs', {})
+                    item['callback'](is_consolidating, reasoning, item['signal_type'], **kwargs)
                 else:
                     logging.error(f"No result returned for {symbol} from batch analysis")
                     # Default to allowing trade if analysis fails
-                    item['callback'](False, "Analysis failed - defaulting to allow", item['signal_type'], *item['callback_args'])
+                    kwargs = item.get('kwargs', {})
+                    item['callback'](False, "Analysis failed - defaulting to allow", item['signal_type'], **kwargs)
                     
         except Exception as e:
             logging.error(f"Error in batch Gemini analysis: {e}", exc_info=True)
