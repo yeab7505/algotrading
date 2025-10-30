@@ -324,6 +324,46 @@ Only respond with the JSON object, no additional text."""
         is_consolidating, _ = self.analyze_consolidation(df, symbol)
         return is_consolidating
 
+    def analyze_multiple_consolidations(self, analyses) -> Dict[str, Tuple[bool, str]]:
+        """
+        Batch analyze multiple markets for consolidation using Gemini.
+        
+        Accepts a list of items, where each item can be either:
+        - dict with keys: 'df' (pd.DataFrame), 'symbol' (str), optional 'context' (str)
+        - tuple in the form: (df, symbol) or (df, symbol, context)
+        
+        Returns a dict mapping symbol -> (is_consolidating, reasoning).
+        Any analysis errors are captured and returned as (False, "Error: <msg>").
+        """
+        results: Dict[str, Tuple[bool, str]] = {}
+        if analyses is None:
+            return results
+        for item in analyses:
+            try:
+                df: Optional[pd.DataFrame] = None
+                symbol: Optional[str] = None
+                context: Optional[str] = None
+                if isinstance(item, dict):
+                    df = item.get('df')
+                    symbol = item.get('symbol')
+                    context = item.get('context')
+                elif isinstance(item, (list, tuple)):
+                    if len(item) >= 2:
+                        df = item[0]
+                        symbol = item[1]
+                    if len(item) >= 3:
+                        context = item[2]
+                else:
+                    raise ValueError("Unsupported analysis item type; expected dict or tuple")
+                if df is None or symbol is None:
+                    raise ValueError("Each analysis item must include df and symbol")
+                is_cons, reason = self.analyze_consolidation(df=df, symbol=str(symbol), context=context)
+                results[str(symbol)] = (is_cons, reason)
+            except Exception as e:
+                key = str(symbol) if symbol is not None else f"item_{len(results)}"
+                results[key] = (False, f"Error in analysis: {e}")
+        return results
+
 
 def check_market_consolidation(df: pd.DataFrame, symbol: str, 
                                api_key: Optional[str] = None) -> bool:
