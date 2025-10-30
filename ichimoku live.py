@@ -820,7 +820,7 @@ class ForwardIchimokuTrader:
             and (current_close > leading_span_A)
             and (current_close > leading_span_B)
             and future_kumo_bullish  # Add future Kumo check
-            and (not(pd.isna(psar_long)))  # Only checks if PSAR exists, not its value
+            # Only checks if PSAR exists, not its value
             
             and adx < adx_limit[self.symbol]
             
@@ -832,7 +832,7 @@ class ForwardIchimokuTrader:
             and (current_close < leading_span_A)
             and (current_close < leading_span_B)
             and future_kumo_bearish  # Add future Kumo check
-            and (not(pd.isna(psar_short)))
+            
               # Only checks if PSAR exists, not its value
             and adx < adx_limit[self.symbol]
         )
