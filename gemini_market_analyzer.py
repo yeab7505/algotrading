@@ -308,7 +308,7 @@ Only respond with the JSON object, no additional text."""
             
         except Exception as e:
             logger.error(f"Error in Gemini analysis for {symbol}: {e}", exc_info=True)
-            return False, f"Error in analysis: {str(e)}"
+            return True, f"Error in analysis: {str(e)}"
     
     def is_market_consolidating(self, df: pd.DataFrame, symbol: str) -> bool:
         """
