@@ -298,7 +298,7 @@ Only respond with the JSON object, no additional text."""
             # Parse response
             result = json.loads(json_str)
             
-            is_consolidating = bool(result.get('is_consolidating', False))
+            is_consolidating = bool(result.get('is_consolidating', True))
             reasoning = result.get('reasoning', 'No reasoning provided')
             confidence = result.get('confidence', 0.5)
             
