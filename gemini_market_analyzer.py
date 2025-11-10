@@ -361,7 +361,7 @@ Only respond with the JSON object, no additional text."""
                 results[str(symbol)] = (is_cons, reason)
             except Exception as e:
                 key = str(symbol) if symbol is not None else f"item_{len(results)}"
-                results[key] = (False, f"Error in analysis: {e}")
+                results[key] = (True, f"Error in analysis: {e}")
         return results
 
 
