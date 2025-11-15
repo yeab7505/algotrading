@@ -379,7 +379,7 @@ def check_market_consolidation(df: pd.DataFrame, symbol: str,
         bool: True if market is consolidating
     """
     # Use provided key or default hardcoded key
-    key = api_key or 'AIzaSyAdyo9u1iFoyoqSXCG3h38ADtuZHmc85vg'
+    key = api_key or 'AIzaSyD4uAV9N_h-XAD_9Su8QlD8jGwhf2OVL04'
     analyzer = GeminiMarketAnalyzer(api_key=key)
     return analyzer.is_market_consolidating(df, symbol)
 
