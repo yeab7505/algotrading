@@ -9,7 +9,8 @@ import logging
 import json
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
+from datetime import date
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -18,19 +19,27 @@ load_dotenv()
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Daily request limit
+DAILY_REQUEST_LIMIT = 250
+
 class GeminiMarketAnalyzer:
     """
     Uses Google's Gemini AI to analyze market data and determine consolidation status.
     """
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, daily_limit: int = DAILY_REQUEST_LIMIT):
         """
         Initialize the Gemini Market Analyzer.
         
         Args:
             api_key: Google Gemini API key. If None, will try to load from environment.
+            daily_limit: Daily request limit (default: 250)
         """
         self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        self.daily_limit = daily_limit
+        self.request_count = 0
+        self.last_reset_date = date.today()
+        self._reset_if_new_day()
         
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not found in environment variables.")
@@ -40,8 +49,8 @@ class GeminiMarketAnalyzer:
             genai.configure(api_key=self.api_key)
             # Use the latest Gemini 2.5 models (Flash is faster and cheaper)
             try:
-                self.client = genai.GenerativeModel('Gemini 2.5 Flash-Lite')
-                logger.info("Gemini AI initialized successfully with Gemini 2.5 Flash-Lite")
+                self.client = genai.GenerativeModel('gemini-2.5-flash')
+                logger.info("Gemini AI initialized successfully with gemini-2.5-flash")
             except Exception as e:
                 logger.warning(f"Failed to initialize gemini-2.5-flash: {e}, trying gemini-2.5-pro...")
                 try:
@@ -55,6 +64,34 @@ class GeminiMarketAnalyzer:
                     except Exception as e3:
                         self.client = genai.GenerativeModel('gemini-1.5-pro')
                         logger.info("Gemini AI initialized successfully with gemini-1.5-pro")
+        
+        logger.info(f"Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
+    
+    def _reset_if_new_day(self):
+        """Reset request count if it's a new day."""
+        today = date.today()
+        if today != self.last_reset_date:
+            self.request_count = 0
+            self.last_reset_date = today
+            logger.info(f"Daily request counter reset. New day: {today}")
+    
+    def get_remaining_requests(self) -> int:
+        """Get the number of remaining API requests for today."""
+        self._reset_if_new_day()
+        remaining = max(0, self.daily_limit - self.request_count)
+        return remaining
+    
+    def _increment_request_count(self):
+        """Increment request count and log remaining requests."""
+        self._reset_if_new_day()
+        self.request_count += 1
+        remaining = self.get_remaining_requests()
+        logger.info(f"API Request #{self.request_count}/{self.daily_limit} used. {remaining} requests remaining today")
+        
+        if remaining <= 10:
+            logger.warning(f"Low API quota: Only {remaining} requests remaining today!")
+        elif remaining <= 0:
+            logger.error("API quota exhausted! No more requests available today.")
     
     def _prepare_market_summary(self, df: pd.DataFrame, symbol: str) -> str:
         """
@@ -188,6 +225,30 @@ Recent Price Action (Last 5 candles):
         
         return summary
     
+    def _prepare_batch_summary(self, analyses: List[Tuple[pd.DataFrame, str, Optional[str]]]) -> str:
+        """
+        Prepare a batch summary of multiple markets for single API call.
+        
+        Args:
+            analyses: List of tuples (df, symbol, context)
+            
+        Returns:
+            Formatted string with all market summaries
+        """
+        batch_summary = "BATCH MARKET ANALYSIS - Multiple Symbols\n"
+        batch_summary += "=" * 50 + "\n\n"
+        
+        for idx, (df, symbol, context) in enumerate(analyses, 1):
+            summary = self._prepare_market_summary(df, symbol)
+            if context:
+                summary += f"\nAdditional Context: {context}\n"
+            batch_summary += f"\n{'='*50}\n"
+            batch_summary += f"SYMBOL {idx}/{len(analyses)}: {symbol}\n"
+            batch_summary += f"{'='*50}\n"
+            batch_summary += summary + "\n"
+        
+        return batch_summary
+    
     def analyze_consolidation(self, df: pd.DataFrame, symbol: str, 
                              context: Optional[str] = None) -> Tuple[bool, str]:
         """
@@ -205,85 +266,47 @@ Recent Price Action (Last 5 candles):
             logger.error("Gemini client not initialized. Cannot analyze consolidation.")
             return False, "Gemini client not initialized. Check API key."
         
+        if self.get_remaining_requests() <= 0:
+            logger.error("API quota exhausted. Cannot make request.")
+            return True, "API quota exhausted. Please try again tomorrow."
+        
         try:
             # Prepare market summary
             market_summary = self._prepare_market_summary(df, symbol)
             
-            # Create prompt for Gemini
-            prompt = f"""You are an expert cryptocurrency market analyst specializing in identifying market consolidation patterns.
+            # Create optimized prompt for Gemini
+            prompt = f"""You are an expert crypto market analyst. Determine if the market is in CONSOLIDATION or TRENDING.
 
-Your task is to analyze market data and determine if the market is currently in a CONSOLIDATING/CHOPPY state or in a TRENDING state.
+Evaluate: NEWS/EVENTS, CORRELATION (BTC/ETH leadership), MARKET STRUCTURE (support/resistance, volume), SENTIMENT.
 
-IMPORTANT: Consider ALL relevant factors, not just technical indicators:
+Definitions:
+- CONSOLIDATION = range-bound, low conviction, mixed structure, sideways relative to typical volatility.
+- TRENDING = clear direction, strong conviction, consistent HH/HL (uptrend) or LH/LL (downtrend), breakouts with momentum.
 
-1. MARKET NEWS & EVENTS:
-   - Recent major announcements (partnerships, listings, regulations)
-   - Macro-economic events affecting crypto markets
-   - Adoption news or institutional developments
-   - Regulatory news or government policies
-   - Exchange or protocol updates
+Rules:
+- Use staircase structure to identify trend.
+- Ignore small counter-trend candles unless they break prior swing structure.
+- Call consolidation only if structure is mixed AND momentum is weak AND price stays within a range.
+- Consider news, correlations, and macro context when technicals conflict.
 
-2. MAJOR CRYPTOCURRENCY CORRELATIONS:
-   - Bitcoin (BTC) movements (market leader, often sets trend)
-   - Ethereum (ETH) correlation (if it's altcoin)
-   - Overall crypto market sentiment
-   - Whether major cryptos are trending or consolidating
-   - Market-wide fear and greed index
-
-3. MARKET STRUCTURE & VOLUME:
-   - Support and resistance levels being tested
-   - Price rejection patterns at key levels
-   - Volume patterns (increasing/decreasing/neutral)
-   - Market depth and liquidity
-   - Order book imbalances
-
-4. MARKET SENTIMENT:
-   - Social media sentiment
-   - Trading volume patterns
-   - Whether price action aligns with fundamentals
-   - Overall crypto market momentum
-
-CONSOLIDATION characteristics:
-- Price oscillating in a bounded range
-- Lack of directional conviction
-- Low volatility and sideways movement
-- Market uncertain about direction
-- Waiting for catalyst (news, event, Bitcoin move)
-
-TRENDING characteristics:
-- Clear directional bias (up or down)
-- Consistent price movement with momentum
-- Strong market conviction
-- Breaking out of ranges or following trend
-- Correlation with major market leaders (BTC/ETH)
-
-DISAMBIGUATION GUIDELINES (qualitative, avoid numeric thresholds):
-- Identify staircase patterns: a sequence of lower highs and lower lows indicates a downtrend; a sequence of higher highs and higher lows indicates an uptrend. Favor the prevailing staircase structure even if candles are small or there are brief pauses.
-- Consider pullbacks as noise unless the pullback breaks prior swing structure in the opposite direction and sustains beyond typical bar size. Do not switch to consolidation due to a few small counter-trend candles if the staircase remains intact.
-- Treat consolidation only when price action is range-bound relative to typical volatility and the structure is mixed (no clear dominance of HH/HL vs LH/LL), alongside subdued momentum and conviction.
-- Prioritize structure and context (news, correlations, liquidity) over single-indicator signals when the evidence conflicts.
-
-Market Data Provided:
+Input Data:
 {market_summary}
 
 Additional Context:
-{context if context else 'Analyze current market conditions holistically'}
+{context or 'None'}
 
-Based on ALL the above factors, determine if the market is CONSOLIDATING or TRENDING.
-Consider news cycles, market events, major crypto correlations, and overall market sentiment - not just the technical indicators.
-
-Respond in the following JSON format:
+Respond ONLY in this JSON format:
 {{
-    "is_consolidating": true/false,
-    "confidence": 0.0-1.0,
-    "reasoning": "brief explanation considering news, correlations, and market factors",
-    "key_factors": ["factor1", "factor2", ...]
+  "is_consolidating": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation referencing news, correlations, structure",
+  "key_factors": ["factor1", "factor2", ...]
 }}
-
-Only respond with the JSON object, no additional text."""
+"""
             
             # Query Gemini
             response = self.client.generate_content(prompt)
+            self._increment_request_count()
             response_text = response.text.strip()
             
             # Extract JSON from response
@@ -300,9 +323,10 @@ Only respond with the JSON object, no additional text."""
             
             is_consolidating = bool(result.get('is_consolidating', True))
             reasoning = result.get('reasoning', 'No reasoning provided')
+            key_factors = result.get('key_factors', [])
             confidence = result.get('confidence', 0.5)
             
-            logger.info(f"Gemini analysis for {symbol}: Consolidating={is_consolidating}, Confidence={confidence:.2f}")
+            logger.info(f"Gemini analysis for {symbol}: Consolidating={is_consolidating}, Confidence={confidence:.2f}, Key Factors={key_factors}")
             
             return is_consolidating, reasoning
             
@@ -326,23 +350,38 @@ Only respond with the JSON object, no additional text."""
 
     def analyze_multiple_consolidations(self, analyses) -> Dict[str, Tuple[bool, str]]:
         """
-        Batch analyze multiple markets for consolidation using Gemini.
+        Batch analyze multiple markets for consolidation using Gemini in a SINGLE API call.
+        This is optimized to save API requests - all symbols are analyzed together.
         
         Accepts a list of items, where each item can be either:
         - dict with keys: 'df' (pd.DataFrame), 'symbol' (str), optional 'context' (str)
         - tuple in the form: (df, symbol) or (df, symbol, context)
         
         Returns a dict mapping symbol -> (is_consolidating, reasoning).
-        Any analysis errors are captured and returned as (False, "Error: <msg>").
+        Any analysis errors are captured and returned as (True, "Error: <msg>").
         """
         results: Dict[str, Tuple[bool, str]] = {}
-        if analyses is None:
+        if analyses is None or len(analyses) == 0:
             return results
+        
+        if self.client is None:
+            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
+            return {str(i): (True, "Gemini client not initialized") for i in range(len(analyses))}
+        
+        if self.get_remaining_requests() <= 0:
+            logger.error("API quota exhausted. Cannot make batch request.")
+            return {str(i): (True, "API quota exhausted") for i in range(len(analyses))}
+        
+        # Parse all analyses into standardized format
+        parsed_analyses: List[Tuple[pd.DataFrame, str, Optional[str]]] = []
+        symbol_order: List[str] = []
+        
         for item in analyses:
             try:
                 df: Optional[pd.DataFrame] = None
                 symbol: Optional[str] = None
                 context: Optional[str] = None
+                
                 if isinstance(item, dict):
                     df = item.get('df')
                     symbol = item.get('symbol')
@@ -355,13 +394,110 @@ Only respond with the JSON object, no additional text."""
                         context = item[2]
                 else:
                     raise ValueError("Unsupported analysis item type; expected dict or tuple")
+                
                 if df is None or symbol is None:
                     raise ValueError("Each analysis item must include df and symbol")
-                is_cons, reason = self.analyze_consolidation(df=df, symbol=str(symbol), context=context)
-                results[str(symbol)] = (is_cons, reason)
+                
+                parsed_analyses.append((df, str(symbol), context))
+                symbol_order.append(str(symbol))
             except Exception as e:
-                key = str(symbol) if symbol is not None else f"item_{len(results)}"
-                results[key] = (True, f"Error in analysis: {e}")
+                key = str(symbol) if symbol is not None else f"item_{len(symbol_order)}"
+                symbol_order.append(key)
+                results[key] = (True, f"Error parsing analysis item: {e}")
+        
+        if len(parsed_analyses) == 0:
+            return results
+        
+        # Batch process all symbols in a single API call
+        try:
+            logger.info(f"Batch analyzing {len(parsed_analyses)} symbols in a single API request (saves {len(parsed_analyses)-1} requests)")
+            
+            batch_summary = self._prepare_batch_summary(parsed_analyses)
+            symbols_list = ", ".join([symbol for _, symbol, _ in parsed_analyses])
+            
+            prompt = f"""You are an expert crypto market analyst. Analyze MULTIPLE markets and determine if each is in CONSOLIDATION or TRENDING.
+
+Evaluate for EACH symbol: NEWS/EVENTS, CORRELATION (BTC/ETH leadership), MARKET STRUCTURE (support/resistance, volume), SENTIMENT.
+
+Definitions:
+- CONSOLIDATION = range-bound, low conviction, mixed structure, sideways relative to typical volatility.
+- TRENDING = clear direction, strong conviction, consistent HH/HL (uptrend) or LH/LL (downtrend), breakouts with momentum.
+
+Rules:
+- Use staircase structure to identify trend.
+- Ignore small counter-trend candles unless they break prior swing structure.
+- Call consolidation only if structure is mixed AND momentum is weak AND price stays within a range.
+- Consider news, correlations, and macro context when technicals conflict.
+
+Input Data (Multiple Symbols):
+{batch_summary}
+
+Respond ONLY in this JSON format with results for ALL symbols:
+{{
+  "results": [
+    {{
+      "symbol": "SYMBOL1",
+      "is_consolidating": true/false,
+      "confidence": 0.0-1.0,
+      "reasoning": "brief explanation",
+      "key_factors": ["factor1", "factor2"]
+    }},
+    {{
+      "symbol": "SYMBOL2",
+      "is_consolidating": true/false,
+      "confidence": 0.0-1.0,
+      "reasoning": "brief explanation",
+      "key_factors": ["factor1", "factor2"]
+    }}
+  ]
+}}
+
+IMPORTANT: Include results for ALL symbols: {symbols_list}
+"""
+            
+            response = self.client.generate_content(prompt)
+            self._increment_request_count()
+            response_text = response.text.strip()
+            
+            # Extract JSON from response
+            json_str = response_text
+            if '```json' in json_str:
+                json_str = json_str.split('```json')[1].split('```')[0]
+            elif '```' in json_str:
+                json_str = json_str.split('```')[1]
+            
+            json_str = json_str.strip()
+            
+            # Parse batch response
+            batch_result = json.loads(json_str)
+            batch_results = batch_result.get('results', [])
+            
+            # Map results back to symbols
+            result_map = {r.get('symbol'): r for r in batch_results}
+            
+            for df, symbol, context in parsed_analyses:
+                if symbol in result_map:
+                    r = result_map[symbol]
+                    is_consolidating = bool(r.get('is_consolidating', True))
+                    reasoning = r.get('reasoning', 'No reasoning provided')
+                    confidence = r.get('confidence', 0.5)
+                    key_factors = r.get('key_factors', [])
+                    
+                    logger.info(f"Batch analysis for {symbol}: Consolidating={is_consolidating}, Confidence={confidence:.2f}")
+                    results[symbol] = (is_consolidating, reasoning)
+                else:
+                    logger.warning(f"No result found for {symbol} in batch response")
+                    results[symbol] = (True, "Symbol not found in batch response")
+            
+            logger.info(f"Batch analysis completed: {len(results)}/{len(parsed_analyses)} symbols analyzed in 1 API request")
+            
+        except Exception as e:
+            logger.error(f"Error in batch Gemini analysis: {e}", exc_info=True)
+            # Fallback: mark all as error
+            for df, symbol, context in parsed_analyses:
+                if symbol not in results:
+                    results[symbol] = (True, f"Error in batch analysis: {str(e)}")
+        
         return results
 
 
@@ -379,7 +515,6 @@ def check_market_consolidation(df: pd.DataFrame, symbol: str,
         bool: True if market is consolidating
     """
     # Use provided key or default hardcoded key
-    key = api_key or 'AIzaSyD4uAV9N_h-XAD_9Su8QlD8jGwhf2OVL04'
+    key = api_key or 'AIzaSyAdyo9u1iFoyoqSXCG3h38ADtuZHmc85vg'
     analyzer = GeminiMarketAnalyzer(api_key=key)
     return analyzer.is_market_consolidating(df, symbol)
-
