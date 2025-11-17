@@ -54,7 +54,7 @@ class GeminiMarketAnalyzer:
             except Exception as e:
                 logger.warning(f"Failed to initialize gemini-2.5-flash: {e}, trying gemini-2.5-pro...")
                 try:
-                    self.client = genai.GenerativeModel('gemini-2.5-pro')
+                    self.client = genai.GenerativeModel('gemini-2.5-flash')
                     logger.info("Gemini AI initialized successfully with gemini-2.5-pro")
                 except Exception as e2:
                     logger.warning(f"Failed to initialize gemini-2.5-pro: {e2}, trying gemini-1.5-flash")
