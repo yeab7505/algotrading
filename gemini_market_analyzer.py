@@ -9,9 +9,14 @@ import logging
 import json
 import pandas as pd
 import numpy as np
+import time
 from typing import Dict, Tuple, Optional, List
 from datetime import date
 import google.generativeai as genai
+try:
+    from google.api_core import exceptions as google_exceptions
+except ImportError:
+    google_exceptions = None
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,8 +24,18 @@ load_dotenv()
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Daily request limit
-DAILY_REQUEST_LIMIT = 250
+# Daily request limit (free tier: 50 per model per day)
+DAILY_REQUEST_LIMIT = 50
+
+# Available models in order of preference (Flash models are faster/cheaper)
+# Free tier: 50 requests per day per model
+AVAILABLE_MODELS = [
+    'gemini-1.5-flash',      # Fastest, cheapest
+    'gemini-2.0-flash-exp',  # Experimental flash
+    'gemini-1.5-pro',        # More capable
+    'gemini-2.5-flash',      # Latest flash
+    'gemini-2.5-pro',        # Latest pro (most expensive)
+]
 
 class GeminiMarketAnalyzer:
     """
@@ -33,7 +48,7 @@ class GeminiMarketAnalyzer:
         
         Args:
             api_key: Google Gemini API key. If None, will try to load from environment.
-            daily_limit: Daily request limit (default: 250)
+            daily_limit: Daily request limit per model (default: 50 for free tier)
         """
         self.api_key = api_key or os.getenv('GEMINI_API_KEY')
         self.daily_limit = daily_limit
@@ -41,31 +56,114 @@ class GeminiMarketAnalyzer:
         self.last_reset_date = date.today()
         self._reset_if_new_day()
         
+        # Track model usage and exhausted models
+        self.current_model_index = 0
+        self.exhausted_models: Dict[str, date] = {}
+        self.model_request_counts: Dict[str, int] = {}
+        
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not found in environment variables.")
             logger.warning("Set it in your .env file or pass it during initialization.")
             self.client = None
+            self.current_model = None
         else:
             genai.configure(api_key=self.api_key)
-            # Use the latest Gemini 2.5 models (Flash is faster and cheaper)
-            try:
-                self.client = genai.GenerativeModel('gemini-2.5-pro')
-                logger.info("Gemini AI initialized successfully with gemini-2.5-flash")
-            except Exception as e:
-                logger.warning(f"Failed to initialize gemini-2.5-flash: {e}, trying gemini-2.5-pro...")
-                try:
-                    self.client = genai.GenerativeModel('gemini-2.5-flash')
-                    logger.info("Gemini AI initialized successfully with gemini-2.5-pro")
-                except Exception as e2:
-                    logger.warning(f"Failed to initialize gemini-2.5-pro: {e2}, trying gemini-1.5-flash")
-                    try:
-                        self.client = genai.GenerativeModel('gemini-1.5-flash')
-                        logger.info("Gemini AI initialized successfully with gemini-1.5-flash")
-                    except Exception as e3:
-                        self.client = genai.GenerativeModel('gemini-1.5-pro')
-                        logger.info("Gemini AI initialized successfully with gemini-1.5-pro")
+            self._initialize_model()
         
         logger.info(f"Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
+    
+    def _initialize_model(self):
+        """Initialize the first available model."""
+        self._reset_exhausted_models()
+        for idx, model_name in enumerate(AVAILABLE_MODELS):
+            try:
+                self.client = genai.GenerativeModel(model_name)
+                self.current_model = model_name
+                self.current_model_index = idx
+                if model_name not in self.model_request_counts:
+                    self.model_request_counts[model_name] = 0
+                logger.info(f"Gemini AI initialized successfully with {model_name}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to initialize {model_name}: {e}")
+                continue
+        
+        logger.error("Failed to initialize any Gemini model")
+        self.client = None
+        self.current_model = None
+    
+    def _reset_exhausted_models(self):
+        """Reset exhausted models if it's a new day."""
+        today = date.today()
+        models_to_remove = []
+        for model_name, exhausted_date in self.exhausted_models.items():
+            if exhausted_date < today:
+                models_to_remove.append(model_name)
+        
+        for model_name in models_to_remove:
+            del self.exhausted_models[model_name]
+            if model_name in self.model_request_counts:
+                self.model_request_counts[model_name] = 0
+            logger.info(f"Reset exhausted model: {model_name}")
+    
+    def _switch_to_next_model(self) -> bool:
+        """Switch to the next available model. Returns True if successful."""
+        self._reset_exhausted_models()
+        
+        # Try next models in order
+        for idx in range(self.current_model_index + 1, len(AVAILABLE_MODELS)):
+            model_name = AVAILABLE_MODELS[idx]
+            
+            # Skip if model is exhausted today
+            if model_name in self.exhausted_models:
+                continue
+            
+            try:
+                self.client = genai.GenerativeModel(model_name)
+                self.current_model = model_name
+                self.current_model_index = idx
+                if model_name not in self.model_request_counts:
+                    self.model_request_counts[model_name] = 0
+                logger.info(f"Switched to model: {model_name}")
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to switch to {model_name}: {e}")
+                continue
+        
+        logger.error("No available models remaining")
+        return False
+    
+    def _is_rate_limit_error(self, error: Exception) -> bool:
+        """Check if error is a rate limit (429) error."""
+        error_str = str(error)
+        if '429' in error_str or 'quota' in error_str.lower() or 'rate limit' in error_str.lower():
+            return True
+        
+        # Check for Google API rate limit exceptions
+        if hasattr(error, 'status_code') and error.status_code == 429:
+            return True
+        
+        if google_exceptions and isinstance(error, google_exceptions.ResourceExhausted):
+            return True
+        
+        return False
+    
+    def _extract_retry_delay(self, error: Exception) -> float:
+        """Extract retry delay from error message. Returns delay in seconds."""
+        error_str = str(error)
+        try:
+            # Try to extract retry delay from error message
+            if 'retry_delay' in error_str or 'retry in' in error_str.lower():
+                import re
+                # Look for patterns like "retry in 39.11264135s" or "seconds: 39"
+                match = re.search(r'(\d+\.?\d*)\s*(?:seconds?|s)', error_str, re.IGNORECASE)
+                if match:
+                    return float(match.group(1))
+        except Exception:
+            pass
+        
+        # Default exponential backoff: start with 5 seconds
+        return 5.0
     
     def _reset_if_new_day(self):
         """Reset request count if it's a new day."""
@@ -81,17 +179,28 @@ class GeminiMarketAnalyzer:
         remaining = max(0, self.daily_limit - self.request_count)
         return remaining
     
-    def _increment_request_count(self):
+    def _increment_request_count(self, model_name: Optional[str] = None):
         """Increment request count and log remaining requests."""
         self._reset_if_new_day()
         self.request_count += 1
-        remaining = self.get_remaining_requests()
-        logger.info(f"API Request #{self.request_count}/{self.daily_limit} used. {remaining} requests remaining today")
         
-        if remaining <= 10:
-            logger.warning(f"Low API quota: Only {remaining} requests remaining today!")
-        elif remaining <= 0:
-            logger.error("API quota exhausted! No more requests available today.")
+        # Track per-model counts
+        if model_name:
+            if model_name not in self.model_request_counts:
+                self.model_request_counts[model_name] = 0
+            self.model_request_counts[model_name] += 1
+            
+            remaining = self.daily_limit - self.model_request_counts[model_name]
+            logger.info(f"API Request for {model_name}: #{self.model_request_counts[model_name]}/{self.daily_limit} used. {remaining} requests remaining today")
+            
+            if remaining <= 10:
+                logger.warning(f"Low API quota for {model_name}: Only {remaining} requests remaining today!")
+            elif remaining <= 0:
+                logger.warning(f"API quota exhausted for {model_name}! Marking as exhausted.")
+                self.exhausted_models[model_name] = date.today()
+        else:
+            remaining = self.get_remaining_requests()
+            logger.info(f"API Request #{self.request_count}/{self.daily_limit} used. {remaining} requests remaining today")
     
     def _prepare_market_summary(self, df: pd.DataFrame, symbol: str) -> str:
         """
@@ -250,7 +359,7 @@ Recent Price Action (Last 5 candles):
         return batch_summary
     
     def analyze_consolidation(self, df: pd.DataFrame, symbol: str, 
-                             context: Optional[str] = None) -> Tuple[bool, str]:
+                             context: Optional[str] = None, max_retries: int = 3) -> Tuple[bool, str]:
         """
         Use Gemini AI to determine if the market is consolidating.
         
@@ -258,6 +367,7 @@ Recent Price Action (Last 5 candles):
             df: DataFrame with market data and indicators
             symbol: Trading symbol
             context: Additional context or constraints
+            max_retries: Maximum number of retries with different models
             
         Returns:
             Tuple of (is_consolidating: bool, reasoning: str)
@@ -266,16 +376,10 @@ Recent Price Action (Last 5 candles):
             logger.error("Gemini client not initialized. Cannot analyze consolidation.")
             return False, "Gemini client not initialized. Check API key."
         
-        if self.get_remaining_requests() <= 0:
-            logger.error("API quota exhausted. Cannot make request.")
-            return True, "API quota exhausted. Please try again tomorrow."
+        # Prepare market summary once
+        market_summary = self._prepare_market_summary(df, symbol)
         
-        try:
-            # Prepare market summary
-            market_summary = self._prepare_market_summary(df, symbol)
-            
-            # Create optimized prompt for Gemini
-            prompt = f"""You are an expert crypto market analyst. Determine if the market is in CONSOLIDATION or TRENDING.
+        prompt = f"""You are an expert crypto market analyst. Determine if the market is in CONSOLIDATION or TRENDING.
 
 Evaluate: NEWS/EVENTS, CORRELATION (BTC/ETH leadership), MARKET STRUCTURE (support/resistance, volume), SENTIMENT.
 
@@ -303,36 +407,79 @@ Respond ONLY in this JSON format:
   "key_factors": ["factor1", "factor2", ...]
 }}
 """
+        
+        # Retry logic with model switching
+        for attempt in range(max_retries + 1):
+            if self.client is None:
+                logger.error("No available models. Cannot analyze consolidation.")
+                return True, "No available models. All models exhausted."
             
-            # Query Gemini
-            response = self.client.generate_content(prompt)
-            self._increment_request_count()
-            response_text = response.text.strip()
+            current_model = self.current_model
+            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
             
-            # Extract JSON from response
-            json_str = response_text
-            if '```json' in json_str:
-                json_str = json_str.split('```json')[1].split('```')[0]
-            elif '```' in json_str:
-                json_str = json_str.split('```')[1]
+            if current_model and model_count >= self.daily_limit:
+                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
+                if not self._switch_to_next_model():
+                    return True, "All models have reached daily quota limits."
+                continue
             
-            json_str = json_str.strip()
-            
-            # Parse response
-            result = json.loads(json_str)
-            
-            is_consolidating = bool(result.get('is_consolidating', True))
-            reasoning = result.get('reasoning', 'No reasoning provided')
-            key_factors = result.get('key_factors', [])
-            confidence = result.get('confidence', 0.5)
-            
-            logger.info(f"Gemini analysis for {symbol}: Consolidating={is_consolidating}, Confidence={confidence:.2f}, Key Factors={key_factors}")
-            
-            return is_consolidating, reasoning
-            
-        except Exception as e:
-            logger.error(f"Error in Gemini analysis for {symbol}: {e}", exc_info=True)
-            return True, f"Error in analysis: {str(e)}"
+            try:
+                # Query Gemini
+                response = self.client.generate_content(prompt)
+                self._increment_request_count(current_model)
+                response_text = response.text.strip()
+                
+                # Extract JSON from response
+                json_str = response_text
+                if '```json' in json_str:
+                    json_str = json_str.split('```json')[1].split('```')[0]
+                elif '```' in json_str:
+                    json_str = json_str.split('```')[1]
+                
+                json_str = json_str.strip()
+                
+                # Parse response
+                result = json.loads(json_str)
+                
+                is_consolidating = bool(result.get('is_consolidating', True))
+                reasoning = result.get('reasoning', 'No reasoning provided')
+                key_factors = result.get('key_factors', [])
+                confidence = result.get('confidence', 0.5)
+                
+                logger.info(f"Gemini analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}, Key Factors={key_factors}")
+                
+                return is_consolidating, reasoning
+                
+            except Exception as e:
+                if self._is_rate_limit_error(e):
+                    logger.warning(f"Rate limit error for {current_model}: {e}")
+                    
+                    # Mark current model as exhausted
+                    if current_model:
+                        self.exhausted_models[current_model] = date.today()
+                        logger.warning(f"Marked {current_model} as exhausted due to rate limit")
+                    
+                    # Try to switch to next model
+                    if attempt < max_retries:
+                        retry_delay = self._extract_retry_delay(e)
+                        logger.info(f"Waiting {retry_delay:.1f}s before switching models...")
+                        time.sleep(min(retry_delay, 10.0))  # Cap delay at 10 seconds
+                        
+                        if self._switch_to_next_model():
+                            logger.info(f"Switched to {self.current_model} for retry attempt {attempt + 1}")
+                            continue
+                        else:
+                            logger.error("No more models available after rate limit error")
+                            return True, f"Rate limit exceeded. All models exhausted: {str(e)}"
+                    else:
+                        logger.error(f"Max retries reached. Rate limit error: {e}")
+                        return True, f"Rate limit exceeded after {max_retries} retries: {str(e)}"
+                else:
+                    # Non-rate-limit error
+                    logger.error(f"Error in Gemini analysis for {symbol}: {e}", exc_info=True)
+                    return True, f"Error in analysis: {str(e)}"
+        
+        return True, "Failed after all retry attempts"
     
     def is_market_consolidating(self, df: pd.DataFrame, symbol: str) -> bool:
         """
@@ -348,7 +495,7 @@ Respond ONLY in this JSON format:
         is_consolidating, _ = self.analyze_consolidation(df, symbol)
         return is_consolidating
 
-    def analyze_multiple_consolidations(self, analyses) -> Dict[str, Tuple[bool, str]]:
+    def analyze_multiple_consolidations(self, analyses, max_retries: int = 3) -> Dict[str, Tuple[bool, str]]:
         """
         Batch analyze multiple markets for consolidation using Gemini in a SINGLE API call.
         This is optimized to save API requests - all symbols are analyzed together.
@@ -367,10 +514,6 @@ Respond ONLY in this JSON format:
         if self.client is None:
             logger.error("Gemini client not initialized. Cannot analyze consolidation.")
             return {str(i): (True, "Gemini client not initialized") for i in range(len(analyses))}
-        
-        if self.get_remaining_requests() <= 0:
-            logger.error("API quota exhausted. Cannot make batch request.")
-            return {str(i): (True, "API quota exhausted") for i in range(len(analyses))}
         
         # Parse all analyses into standardized format
         parsed_analyses: List[Tuple[pd.DataFrame, str, Optional[str]]] = []
@@ -408,14 +551,11 @@ Respond ONLY in this JSON format:
         if len(parsed_analyses) == 0:
             return results
         
-        # Batch process all symbols in a single API call
-        try:
-            logger.info(f"Batch analyzing {len(parsed_analyses)} symbols in a single API request (saves {len(parsed_analyses)-1} requests)")
-            
-            batch_summary = self._prepare_batch_summary(parsed_analyses)
-            symbols_list = ", ".join([symbol for _, symbol, _ in parsed_analyses])
-            
-            prompt = f"""You are an expert crypto market analyst. Analyze MULTIPLE markets and determine if each is in CONSOLIDATION or TRENDING.
+        # Prepare batch summary once
+        batch_summary = self._prepare_batch_summary(parsed_analyses)
+        symbols_list = ", ".join([symbol for _, symbol, _ in parsed_analyses])
+        
+        prompt = f"""You are an expert crypto market analyst. Analyze MULTIPLE markets and determine if each is in CONSOLIDATION or TRENDING.
 
 Evaluate for EACH symbol: NEWS/EVENTS, CORRELATION (BTC/ETH leadership), MARKET STRUCTURE (support/resistance, volume), SENTIMENT.
 
@@ -454,50 +594,116 @@ Respond ONLY in this JSON format with results for ALL symbols:
 
 IMPORTANT: Include results for ALL symbols: {symbols_list}
 """
-            
-            response = self.client.generate_content(prompt)
-            self._increment_request_count()
-            response_text = response.text.strip()
-            
-            # Extract JSON from response
-            json_str = response_text
-            if '```json' in json_str:
-                json_str = json_str.split('```json')[1].split('```')[0]
-            elif '```' in json_str:
-                json_str = json_str.split('```')[1]
-            
-            json_str = json_str.strip()
-            
-            # Parse batch response
-            batch_result = json.loads(json_str)
-            batch_results = batch_result.get('results', [])
-            
-            # Map results back to symbols
-            result_map = {r.get('symbol'): r for r in batch_results}
-            
-            for df, symbol, context in parsed_analyses:
-                if symbol in result_map:
-                    r = result_map[symbol]
-                    is_consolidating = bool(r.get('is_consolidating', True))
-                    reasoning = r.get('reasoning', 'No reasoning provided')
-                    confidence = r.get('confidence', 0.5)
-                    key_factors = r.get('key_factors', [])
-                    
-                    logger.info(f"Batch analysis for {symbol}: Consolidating={is_consolidating}, Confidence={confidence:.2f}")
-                    results[symbol] = (is_consolidating, reasoning)
-                else:
-                    logger.warning(f"No result found for {symbol} in batch response")
-                    results[symbol] = (True, "Symbol not found in batch response")
-            
-            logger.info(f"Batch analysis completed: {len(results)}/{len(parsed_analyses)} symbols analyzed in 1 API request")
-            
-        except Exception as e:
-            logger.error(f"Error in batch Gemini analysis: {e}", exc_info=True)
-            # Fallback: mark all as error
-            for df, symbol, context in parsed_analyses:
-                if symbol not in results:
-                    results[symbol] = (True, f"Error in batch analysis: {str(e)}")
         
+        # Retry logic with model switching
+        for attempt in range(max_retries + 1):
+            if self.client is None:
+                logger.error("No available models. Cannot analyze consolidation.")
+                error_msg = "No available models. All models exhausted."
+                for df, symbol, context in parsed_analyses:
+                    if symbol not in results:
+                        results[symbol] = (True, error_msg)
+                return results
+            
+            current_model = self.current_model
+            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
+            
+            if current_model and model_count >= self.daily_limit:
+                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
+                if not self._switch_to_next_model():
+                    error_msg = "All models have reached daily quota limits."
+                    for df, symbol, context in parsed_analyses:
+                        if symbol not in results:
+                            results[symbol] = (True, error_msg)
+                    return results
+                continue
+            
+            try:
+                logger.info(f"Batch analyzing {len(parsed_analyses)} symbols in a single API request using {current_model} (saves {len(parsed_analyses)-1} requests)")
+                
+                response = self.client.generate_content(prompt)
+                self._increment_request_count(current_model)
+                response_text = response.text.strip()
+                
+                # Extract JSON from response
+                json_str = response_text
+                if '```json' in json_str:
+                    json_str = json_str.split('```json')[1].split('```')[0]
+                elif '```' in json_str:
+                    json_str = json_str.split('```')[1]
+                
+                json_str = json_str.strip()
+                
+                # Parse batch response
+                batch_result = json.loads(json_str)
+                batch_results = batch_result.get('results', [])
+                
+                # Map results back to symbols
+                result_map = {r.get('symbol'): r for r in batch_results}
+                
+                for df, symbol, context in parsed_analyses:
+                    if symbol in result_map:
+                        r = result_map[symbol]
+                        is_consolidating = bool(r.get('is_consolidating', True))
+                        reasoning = r.get('reasoning', 'No reasoning provided')
+                        confidence = r.get('confidence', 0.5)
+                        key_factors = r.get('key_factors', [])
+                        
+                        logger.info(f"Batch analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}")
+                        results[symbol] = (is_consolidating, reasoning)
+                    else:
+                        logger.warning(f"No result found for {symbol} in batch response")
+                        results[symbol] = (True, "Symbol not found in batch response")
+                
+                logger.info(f"Batch analysis completed: {len(results)}/{len(parsed_analyses)} symbols analyzed in 1 API request")
+                return results
+                
+            except Exception as e:
+                if self._is_rate_limit_error(e):
+                    logger.warning(f"Rate limit error for {current_model}: {e}")
+                    
+                    # Mark current model as exhausted
+                    if current_model:
+                        self.exhausted_models[current_model] = date.today()
+                        logger.warning(f"Marked {current_model} as exhausted due to rate limit")
+                    
+                    # Try to switch to next model
+                    if attempt < max_retries:
+                        retry_delay = self._extract_retry_delay(e)
+                        logger.info(f"Waiting {retry_delay:.1f}s before switching models...")
+                        time.sleep(min(retry_delay, 10.0))  # Cap delay at 10 seconds
+                        
+                        if self._switch_to_next_model():
+                            logger.info(f"Switched to {self.current_model} for retry attempt {attempt + 1}")
+                            continue
+                        else:
+                            logger.error("No more models available after rate limit error")
+                            error_msg = f"Rate limit exceeded. All models exhausted: {str(e)}"
+                            for df, symbol, context in parsed_analyses:
+                                if symbol not in results:
+                                    results[symbol] = (True, error_msg)
+                            return results
+                    else:
+                        logger.error(f"Max retries reached. Rate limit error: {e}")
+                        error_msg = f"Rate limit exceeded after {max_retries} retries: {str(e)}"
+                        for df, symbol, context in parsed_analyses:
+                            if symbol not in results:
+                                results[symbol] = (True, error_msg)
+                        return results
+                else:
+                    # Non-rate-limit error
+                    logger.error(f"Error in batch Gemini analysis: {e}", exc_info=True)
+                    error_msg = f"Error in batch analysis: {str(e)}"
+                    for df, symbol, context in parsed_analyses:
+                        if symbol not in results:
+                            results[symbol] = (True, error_msg)
+                    return results
+        
+        # Fallback: mark all as error
+        error_msg = "Failed after all retry attempts"
+        for df, symbol, context in parsed_analyses:
+            if symbol not in results:
+                results[symbol] = (True, error_msg)
         return results
 
 
@@ -509,12 +715,10 @@ def check_market_consolidation(df: pd.DataFrame, symbol: str,
     Args:
         df: DataFrame with market data and indicators
         symbol: Trading symbol
-        api_key: Optional Gemini API key
+        api_key: Optional Gemini API key (if None, uses GEMINI_API_KEY from environment)
         
     Returns:
         bool: True if market is consolidating
     """
-    # Use provided key or default hardcoded key
-    key = api_key or 'AIzaSyAdyo9u1iFoyoqSXCG3h38ADtuZHmc85vg'
-    analyzer = GeminiMarketAnalyzer(api_key=key)
+    analyzer = GeminiMarketAnalyzer(api_key='AIzaSyAdyo9u1iFoyoqSXCG3h38ADtuZHmc85vg')
     return analyzer.is_market_consolidating(df, symbol)
