@@ -25,7 +25,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Daily request limit (free tier: 50 per model per day)
-DAILY_REQUEST_LIMIT = 50
+DAILY_REQUEST_LIMIT = 200
 
 # Available models in order of preference (Flash models are faster/cheaper)
 # Free tier: 50 requests per day per model
