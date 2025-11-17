@@ -30,9 +30,9 @@ DAILY_REQUEST_LIMIT = 50
 # Available models in order of preference (Flash models are faster/cheaper)
 # Free tier: 50 requests per day per model
 AVAILABLE_MODELS = [
-    'Gemini 2.5 Flash-Lite',      # Fastest, cheapest
-    'Gemini 2.0 Flash-Lite',  # Experimental flash
-    'gemini-1.5-pro',        # More capable
+    'gemini-2.0-flash',      # Fastest, cheapest
+    'gemini-2.0-flash-lite',  # Experimental flash
+    'gemini-2.5-flash-lite',        # More capable
     'gemini-2.5-flash',      # Latest flash
     'gemini-2.5-pro',        # Latest pro (most expensive)
 ]
