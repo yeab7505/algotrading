@@ -51,7 +51,7 @@ class GeminiMarketAnalyzer:
             api_key: Google Gemini API key. If None, will try to load from environment.
             daily_limit: Daily request limit per model (default: 50 for free tier)
         """
-        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        self.api_key = api_key or os.getenv('AIzaSyBbWrXelA5WLJiedbqjp7j5M9QzmwA6tPk')
         self.daily_limit = daily_limit
         self.request_count = 0
         self.last_reset_date = date.today()
@@ -721,5 +721,5 @@ def check_market_consolidation(df: pd.DataFrame, symbol: str,
     Returns:
         bool: True if market is consolidating
     """
-    analyzer = GeminiMarketAnalyzer(api_key='AIzaSyBbWrXelA5WLJiedbqjp7j5M9QzmwA6tPk')
+    analyzer = GeminiMarketAnalyzer(api_key=self.api_key)
     return analyzer.is_market_consolidating(df, symbol)
