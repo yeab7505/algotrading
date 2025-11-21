@@ -861,61 +861,18 @@ class ForwardIchimokuTrader:
         if buy_signal or sell_signal:
             try:
                 if hasattr(self, 'gemini') and self.gemini is not None:
-                    # Prepare both HTF and LTF (15m) analyses for BATCH processing
-                    # This sends BOTH timeframes in a SINGLE API request
-                    analyses = [
-                        (self.df_HTF, self.symbol, "Higher Timeframe (4H) Analysis. Important for trend direction."),
-                        (self.df, self.symbol, "Lower Timeframe (15m) Analysis. Important for entry timing.")
-                    ]
-                    
-                    # Use batch analysis to check both timeframes efficiently
-                    # Returns a dict keyed by symbol. Since we have the same symbol twice,
-                    # we need to handle this carefully. The GeminiMarketAnalyzer doesn't natively support
-                    # duplicate symbols well in the return dict if not using unique keys.
-                    # 
-                    # Hack: Append a suffix to the symbol for the context to differentiate in the batch processor if needed,
-                    # BUT GeminiMarketAnalyzer uses the symbol as key.
-                    #
-                    # Let's look at GeminiMarketAnalyzer.analyze_multiple_consolidations implementation.
-                    # It keys by the symbol passed in the tuple.
-                    # So we should pass distinct "symbols" to the analyzer to get distinct results back.
-                    
-                    htf_key = f"{self.symbol}_HTF"
-                    ltf_key = f"{self.symbol}_LTF"
-                    
-                    batch_analyses = [
-                        (self.df_HTF, htf_key, "Higher Timeframe (4H) Analysis. Important for trend direction."),
-                        (self.df, ltf_key, "Lower Timeframe (15m) Analysis. Important for entry timing.")
-                    ]
-                    
-                    results = self.gemini.analyze_multiple_consolidations(batch_analyses)
-                    
-                    # Retrieve results using our unique keys
-                    is_htf_consolidating, htf_reason = results.get(htf_key, (True, "Analysis failed"))
-                    is_ltf_consolidating, ltf_reason = results.get(ltf_key, (True, "Analysis failed"))
+                    # Use the new Multi-Timeframe Analysis (Single API Request)
+                    is_consolidating, reasoning = self.gemini.analyze_multi_timeframe_consolidation(
+                        df_ltf=self.df,
+                        df_htf=self.df_HTF,
+                        symbol=self.symbol
+                    )
 
-                    if is_htf_consolidating:
+                    if is_consolidating:
                         self.logger.warning(
-                            f"🧠 Gemini detected HTF consolidation for {self.symbol}: {htf_reason}. "
+                            f"🧠 Gemini detected consolidation for {self.symbol} (Multi-TF Analysis): {reasoning}. "
                             f"Trade BLOCKED."
                         )
-                        block_reason = f"HTF Consolidation: {htf_reason}"
-                        should_block = True
-                    elif is_ltf_consolidating:
-                         self.logger.warning(
-                            f"🧠 Gemini detected LTF consolidation for {self.symbol}: {ltf_reason}. "
-                            f"Trade BLOCKED."
-                        )
-                         block_reason = f"LTF Consolidation: {ltf_reason}"
-                         should_block = True
-                    else:
-                        self.logger.info(
-                            f"🧠 Gemini confirmed trending market for {self.symbol} on both HTF and LTF. "
-                            f"HTF: {htf_reason}, LTF: {ltf_reason}. Trade ALLOWED."
-                        )
-                        should_block = False
-                    
-                    if should_block:
                         # Send Telegram notification about blocked trade
                         try:
                             if 'telegram_reporter' in globals() and telegram_reporter:
@@ -924,13 +881,18 @@ class ForwardIchimokuTrader:
                                 telegram_reporter.send(
                                     f"⚠️ <b>Trade Blocked</b> - <code>{self.symbol}</code>\n"
                                     f"Signal: {signal_type} @ ${price:.4f}\n"
-                                    f"Reason: {block_reason}"
+                                    f"Reason: Market is consolidating (Multi-TF)\n"
+                                    f"💡 {reasoning}"
                                 )
                         except Exception as e:
                             self.logger.error(f"Failed to send Telegram notification: {e}")
                         
                         return False, False
                     else:
+                        self.logger.info(
+                            f"🧠 Gemini confirmed trending market for {self.symbol} (Multi-TF Analysis): {reasoning}. "
+                            f"Trade ALLOWED."
+                        )
                         # Optional: Send Telegram notification about allowed trade
                         try:
                              if 'telegram_reporter' in globals() and telegram_reporter:
@@ -939,9 +901,8 @@ class ForwardIchimokuTrader:
                                  telegram_reporter.send(
                                      f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
                                      f"Signal: {signal_type} @ ${price:.4f}\n"
-                                     f"Status: Trending on HTF & LTF\n"
-                                     f"💡 HTF: {htf_reason}\n"
-                                     f"💡 LTF: {ltf_reason}"
+                                     f"Status: Trending (Multi-TF Confirmed)\n"
+                                     f"💡 {reasoning}"
                                  )
                         except Exception as e:
                              self.logger.error(f"Failed to send Telegram notification: {e}")
