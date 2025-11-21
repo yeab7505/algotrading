@@ -335,30 +335,124 @@ Recent Price Action (Last 5 candles):
         
         return summary
     
-    def _prepare_batch_summary(self, analyses: List[Tuple[pd.DataFrame, str, Optional[str]]]) -> str:
+    def is_market_consolidating(self, df: pd.DataFrame, symbol: str) -> bool:
         """
-        Prepare a batch summary of multiple markets for single API call.
+        Simplified interface to check if market is consolidating.
         
         Args:
-            analyses: List of tuples (df, symbol, context)
+            df: DataFrame with market data
+            symbol: Trading symbol
             
         Returns:
-            Formatted string with all market summaries
+            bool: True if market is consolidating, False otherwise
         """
-        batch_summary = "BATCH MARKET ANALYSIS - Multiple Symbols\n"
-        batch_summary += "=" * 50 + "\n\n"
+        is_consolidating, _ = self.analyze_consolidation(df, symbol)
+        return is_consolidating
+
+    def analyze_multi_timeframe_consolidation(self, 
+                                             df_ltf: pd.DataFrame, 
+                                             df_htf: pd.DataFrame, 
+                                             symbol: str, 
+                                             max_retries: int = 3) -> Tuple[bool, str]:
+        """
+        Analyze consolidation across both Lower Timeframe (LTF) and Higher Timeframe (HTF) in a SINGLE request.
         
-        for idx, (df, symbol, context) in enumerate(analyses, 1):
-            summary = self._prepare_market_summary(df, symbol)
-            if context:
-                summary += f"\nAdditional Context: {context}\n"
-            batch_summary += f"\n{'='*50}\n"
-            batch_summary += f"SYMBOL {idx}/{len(analyses)}: {symbol}\n"
-            batch_summary += f"{'='*50}\n"
-            batch_summary += summary + "\n"
+        Args:
+            df_ltf: Lower timeframe DataFrame (e.g., 15m)
+            df_htf: Higher timeframe DataFrame (e.g., 4H)
+            symbol: Trading symbol
+            max_retries: Max retry attempts
+            
+        Returns:
+            Tuple of (is_consolidating: bool, reasoning: str)
+            Returns True (is consolidating) only if BOTH timeframes show issues or overall market is unsafe.
+            Returns False (is trending) if the market is suitable for trading.
+        """
+        if self.client is None:
+            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
+            return False, "Gemini client not initialized. Check API key."
         
-        return batch_summary
-    
+        # Prepare market summaries
+        ltf_summary = self._prepare_market_summary(df_ltf, symbol)
+        htf_summary = self._prepare_market_summary(df_htf, symbol)
+        
+        prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes to determine if the asset is TRENDING or CONSOLIDATING.
+
+SYMBOL: {symbol}
+
+DATA 1: LOWER TIMEFRAME (15m) - Entry Timing
+{ltf_summary}
+
+DATA 2: HIGHER TIMEFRAME (4H) - Trend Direction
+{htf_summary}
+
+Definitions:
+- CONSOLIDATION = range-bound, choppy, mixed structure, low momentum.
+- TRENDING = clear direction (uptrend/downtrend), consistent structure (HH/HL or LH/LL), strong momentum.
+
+Task:
+Synthesize both timeframes to decide if a trade is safe. 
+- If HTF is trending strongly but LTF is consolidating (bull flag), this might be safe (Trending) but still needs to be confirmed by the LTF, allow the trade if you are very very confident in the HFT.
+- If HTF is consolidating/choppy, the market is unsafe regardless of LTF (Consolidating).
+- If both are choppy, it is definitely Consolidating.
+
+Respond ONLY in this JSON format:
+{{
+  "is_consolidating": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "Concise explanation synthesizing both timeframes (e.g., 'HTF uptrend strong, LTF breakout confirmed')",
+  "key_factors": ["factor1", "factor2"]
+}}
+"""
+        
+        # Retry logic with model switching (same as single analysis)
+        for attempt in range(max_retries + 1):
+            if self.client is None:
+                return True, "No available models."
+            
+            current_model = self.current_model
+            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
+            
+            if current_model and model_count >= self.daily_limit:
+                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
+                if not self._switch_to_next_model():
+                    return True, "All models have reached daily quota limits."
+                continue
+            
+            try:
+                response = self.client.generate_content(prompt)
+                self._increment_request_count(current_model)
+                response_text = response.text.strip()
+                
+                # Extract JSON
+                json_str = response_text
+                if '```json' in json_str:
+                    json_str = json_str.split('```json')[1].split('```')[0]
+                elif '```' in json_str:
+                    json_str = json_str.split('```')[1]
+                json_str = json_str.strip()
+                
+                result = json.loads(json_str)
+                is_consolidating = bool(result.get('is_consolidating', True))
+                reasoning = result.get('reasoning', 'No reasoning provided')
+                confidence = result.get('confidence', 0.5)
+                
+                logger.info(f"Multi-TF Analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}")
+                return is_consolidating, reasoning
+                
+            except Exception as e:
+                if self._is_rate_limit_error(e):
+                    logger.warning(f"Rate limit error for {current_model}: {e}")
+                    if current_model: self.exhausted_models[current_model] = date.today()
+                    if attempt < max_retries:
+                         if self._switch_to_next_model(): continue
+                    return True, f"Rate limit exceeded: {e}"
+                else:
+                    logger.error(f"Error in Multi-TF analysis: {e}")
+                    return True, f"Error in analysis: {str(e)}"
+        
+        return True, "Failed after all retry attempts"
+
     def analyze_consolidation(self, df: pd.DataFrame, symbol: str, 
                              context: Optional[str] = None, max_retries: int = 3) -> Tuple[bool, str]:
         """
@@ -481,335 +575,6 @@ Respond ONLY in this JSON format:
                     return True, f"Error in analysis: {str(e)}"
         
         return True, "Failed after all retry attempts"
-    
-    def is_market_consolidating(self, df: pd.DataFrame, symbol: str) -> bool:
-        """
-        Simplified interface to check if market is consolidating.
-        
-        Args:
-            df: DataFrame with market data
-            symbol: Trading symbol
-            
-        Returns:
-            bool: True if market is consolidating, False otherwise
-        """
-        is_consolidating, _ = self.analyze_consolidation(df, symbol)
-        return is_consolidating
-
-    def analyze_multi_timeframe_consolidation(self, 
-                                             df_ltf: pd.DataFrame, 
-                                             df_htf: pd.DataFrame, 
-                                             symbol: str, 
-                                             max_retries: int = 3) -> Tuple[bool, str]:
-        """
-        Analyze consolidation across both Lower Timeframe (LTF) and Higher Timeframe (HTF) in a SINGLE request.
-        
-        Args:
-            df_ltf: Lower timeframe DataFrame (e.g., 15m)
-            df_htf: Higher timeframe DataFrame (e.g., 4H)
-            symbol: Trading symbol
-            max_retries: Max retry attempts
-            
-        Returns:
-            Tuple of (is_consolidating: bool, reasoning: str)
-            Returns True (is consolidating) only if BOTH timeframes show issues or overall market is unsafe.
-            Returns False (is trending) if the market is suitable for trading.
-        """
-        if self.client is None:
-            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
-            return False, "Gemini client not initialized. Check API key."
-        
-        # Prepare market summaries
-        ltf_summary = self._prepare_market_summary(df_ltf, symbol)
-        htf_summary = self._prepare_market_summary(df_htf, symbol)
-        
-        prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes to determine if the asset is TRENDING or CONSOLIDATING.
-
-SYMBOL: {symbol}
-
-DATA 1: LOWER TIMEFRAME (15m) - Entry Timing
-{ltf_summary}
-
-DATA 2: HIGHER TIMEFRAME (4H/1H) - Trend Direction
-{htf_summary}
-
-Definitions:
-- CONSOLIDATION = range-bound, choppy, mixed structure, low momentum.
-- TRENDING = clear direction (uptrend/downtrend), consistent structure (HH/HL or LH/LL), strong momentum.
-
-Task:
-Synthesize both timeframes to decide if a trade is safe. 
-- If HTF is trending strongly but LTF is consolidating (bull flag), this might be safe (Trending).
-- If HTF is consolidating/choppy, the market is unsafe regardless of LTF (Consolidating).
-- If both are choppy, it is definitely Consolidating.
-
-Respond ONLY in this JSON format:
-{{
-  "is_consolidating": true/false,
-  "confidence": 0.0-1.0,
-  "reasoning": "Concise explanation synthesizing both timeframes (e.g., 'HTF uptrend strong, LTF breakout confirmed')",
-  "key_factors": ["factor1", "factor2"]
-}}
-"""
-        
-        # Retry logic with model switching (same as single analysis)
-        for attempt in range(max_retries + 1):
-            if self.client is None:
-                return True, "No available models."
-            
-            current_model = self.current_model
-            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
-            
-            if current_model and model_count >= self.daily_limit:
-                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
-                if not self._switch_to_next_model():
-                    return True, "All models have reached daily quota limits."
-                continue
-            
-            try:
-                response = self.client.generate_content(prompt)
-                self._increment_request_count(current_model)
-                response_text = response.text.strip()
-                
-                # Extract JSON
-                json_str = response_text
-                if '```json' in json_str:
-                    json_str = json_str.split('```json')[1].split('```')[0]
-                elif '```' in json_str:
-                    json_str = json_str.split('```')[1]
-                json_str = json_str.strip()
-                
-                result = json.loads(json_str)
-                is_consolidating = bool(result.get('is_consolidating', True))
-                reasoning = result.get('reasoning', 'No reasoning provided')
-                confidence = result.get('confidence', 0.5)
-                
-                logger.info(f"Multi-TF Analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}")
-                return is_consolidating, reasoning
-                
-            except Exception as e:
-                if self._is_rate_limit_error(e):
-                    logger.warning(f"Rate limit error for {current_model}: {e}")
-                    if current_model: self.exhausted_models[current_model] = date.today()
-                    if attempt < max_retries:
-                         if self._switch_to_next_model(): continue
-                    return True, f"Rate limit exceeded: {e}"
-                else:
-                    logger.error(f"Error in Multi-TF analysis: {e}")
-                    return True, f"Error in analysis: {str(e)}"
-        
-        return True, "Failed after all retry attempts"
-
-    def analyze_multiple_consolidations(self, analyses, max_retries: int = 3) -> Dict[str, Tuple[bool, str]]:
-        """
-        Batch analyze multiple markets for consolidation using Gemini in a SINGLE API call.
-        This is optimized to save API requests - all symbols are analyzed together.
-        
-        Accepts a list of items, where each item can be either:
-        - dict with keys: 'df' (pd.DataFrame), 'symbol' (str), optional 'context' (str)
-        - tuple in the form: (df, symbol) or (df, symbol, context)
-        
-        Returns a dict mapping symbol -> (is_consolidating, reasoning).
-        Any analysis errors are captured and returned as (True, "Error: <msg>").
-        """
-        results: Dict[str, Tuple[bool, str]] = {}
-        if analyses is None or len(analyses) == 0:
-            return results
-        
-        if self.client is None:
-            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
-            return {str(i): (True, "Gemini client not initialized") for i in range(len(analyses))}
-        
-        # Parse all analyses into standardized format
-        parsed_analyses: List[Tuple[pd.DataFrame, str, Optional[str]]] = []
-        symbol_order: List[str] = []
-        
-        for item in analyses:
-            try:
-                df: Optional[pd.DataFrame] = None
-                symbol: Optional[str] = None
-                context: Optional[str] = None
-                
-                if isinstance(item, dict):
-                    df = item.get('df')
-                    symbol = item.get('symbol')
-                    context = item.get('context')
-                elif isinstance(item, (list, tuple)):
-                    if len(item) >= 2:
-                        df = item[0]
-                        symbol = item[1]
-                    if len(item) >= 3:
-                        context = item[2]
-                else:
-                    raise ValueError("Unsupported analysis item type; expected dict or tuple")
-                
-                if df is None or symbol is None:
-                    raise ValueError("Each analysis item must include df and symbol")
-                
-                parsed_analyses.append((df, str(symbol), context))
-                symbol_order.append(str(symbol))
-            except Exception as e:
-                key = str(symbol) if symbol is not None else f"item_{len(symbol_order)}"
-                symbol_order.append(key)
-                results[key] = (True, f"Error parsing analysis item: {e}")
-        
-        if len(parsed_analyses) == 0:
-            return results
-        
-        # Prepare batch summary once
-        batch_summary = self._prepare_batch_summary(parsed_analyses)
-        symbols_list = ", ".join([symbol for _, symbol, _ in parsed_analyses])
-        
-        prompt = f"""You are an expert crypto market analyst. Analyze MULTIPLE markets and determine if each is in CONSOLIDATION or TRENDING.
-
-Evaluate for EACH symbol: NEWS/EVENTS, CORRELATION (BTC/ETH leadership), MARKET STRUCTURE (support/resistance, volume), SENTIMENT.
-
-Definitions:
-- CONSOLIDATION = range-bound, low conviction, mixed structure, sideways relative to typical volatility.
-- TRENDING = clear direction, strong conviction, consistent HH/HL (uptrend) or LH/LL (downtrend), breakouts with momentum.
-
-Rules:
-- Use staircase structure to identify trend.
-- Ignore small counter-trend candles unless they break prior swing structure.
-- Call consolidation only if structure is mixed AND momentum is weak AND price stays within a range.
-- Consider news, correlations, and macro context when technicals conflict.
-
-Input Data (Multiple Symbols):
-{batch_summary}
-
-Respond ONLY in this JSON format with results for ALL symbols:
-{{
-  "results": [
-    {{
-      "symbol": "SYMBOL1",
-      "is_consolidating": true/false,
-      "confidence": 0.0-1.0,
-      "reasoning": "brief explanation",
-      "key_factors": ["factor1", "factor2"]
-    }},
-    {{
-      "symbol": "SYMBOL2",
-      "is_consolidating": true/false,
-      "confidence": 0.0-1.0,
-      "reasoning": "brief explanation",
-      "key_factors": ["factor1", "factor2"]
-    }}
-  ]
-}}
-
-IMPORTANT: Include results for ALL symbols: {symbols_list}
-"""
-        
-        # Retry logic with model switching
-        for attempt in range(max_retries + 1):
-            if self.client is None:
-                logger.error("No available models. Cannot analyze consolidation.")
-                error_msg = "No available models. All models exhausted."
-                for df, symbol, context in parsed_analyses:
-                    if symbol not in results:
-                        results[symbol] = (True, error_msg)
-                return results
-            
-            current_model = self.current_model
-            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
-            
-            if current_model and model_count >= self.daily_limit:
-                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
-                if not self._switch_to_next_model():
-                    error_msg = "All models have reached daily quota limits."
-                    for df, symbol, context in parsed_analyses:
-                        if symbol not in results:
-                            results[symbol] = (True, error_msg)
-                    return results
-                continue
-            
-            try:
-                logger.info(f"Batch analyzing {len(parsed_analyses)} symbols in a single API request using {current_model} (saves {len(parsed_analyses)-1} requests)")
-                
-                response = self.client.generate_content(prompt)
-                self._increment_request_count(current_model)
-                response_text = response.text.strip()
-                
-                # Extract JSON from response
-                json_str = response_text
-                if '```json' in json_str:
-                    json_str = json_str.split('```json')[1].split('```')[0]
-                elif '```' in json_str:
-                    json_str = json_str.split('```')[1]
-                
-                json_str = json_str.strip()
-                
-                # Parse batch response
-                batch_result = json.loads(json_str)
-                batch_results = batch_result.get('results', [])
-                
-                # Map results back to symbols
-                result_map = {r.get('symbol'): r for r in batch_results}
-                
-                for df, symbol, context in parsed_analyses:
-                    if symbol in result_map:
-                        r = result_map[symbol]
-                        is_consolidating = bool(r.get('is_consolidating', True))
-                        reasoning = r.get('reasoning', 'No reasoning provided')
-                        confidence = r.get('confidence', 0.5)
-                        key_factors = r.get('key_factors', [])
-                        
-                        logger.info(f"Batch analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}")
-                        results[symbol] = (is_consolidating, reasoning)
-                    else:
-                        logger.warning(f"No result found for {symbol} in batch response")
-                        results[symbol] = (True, "Symbol not found in batch response")
-                
-                logger.info(f"Batch analysis completed: {len(results)}/{len(parsed_analyses)} symbols analyzed in 1 API request")
-                return results
-                
-            except Exception as e:
-                if self._is_rate_limit_error(e):
-                    logger.warning(f"Rate limit error for {current_model}: {e}")
-                    
-                    # Mark current model as exhausted
-                    if current_model:
-                        self.exhausted_models[current_model] = date.today()
-                        logger.warning(f"Marked {current_model} as exhausted due to rate limit")
-                    
-                    # Try to switch to next model
-                    if attempt < max_retries:
-                        retry_delay = self._extract_retry_delay(e)
-                        logger.info(f"Waiting {retry_delay:.1f}s before switching models...")
-                        time.sleep(min(retry_delay, 10.0))  # Cap delay at 10 seconds
-                        
-                        if self._switch_to_next_model():
-                            logger.info(f"Switched to {self.current_model} for retry attempt {attempt + 1}")
-                            continue
-                        else:
-                            logger.error("No more models available after rate limit error")
-                            error_msg = f"Rate limit exceeded. All models exhausted: {str(e)}"
-                            for df, symbol, context in parsed_analyses:
-                                if symbol not in results:
-                                    results[symbol] = (True, error_msg)
-                            return results
-                    else:
-                        logger.error(f"Max retries reached. Rate limit error: {e}")
-                        error_msg = f"Rate limit exceeded after {max_retries} retries: {str(e)}"
-                        for df, symbol, context in parsed_analyses:
-                            if symbol not in results:
-                                results[symbol] = (True, error_msg)
-                        return results
-                else:
-                    # Non-rate-limit error
-                    logger.error(f"Error in batch Gemini analysis: {e}", exc_info=True)
-                    error_msg = f"Error in batch analysis: {str(e)}"
-                    for df, symbol, context in parsed_analyses:
-                        if symbol not in results:
-                            results[symbol] = (True, error_msg)
-                    return results
-        
-        # Fallback: mark all as error
-        error_msg = "Failed after all retry attempts"
-        for df, symbol, context in parsed_analyses:
-            if symbol not in results:
-                results[symbol] = (True, error_msg)
-        return results
 
 
 def check_market_consolidation(df: pd.DataFrame, symbol: str, 
