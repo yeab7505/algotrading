@@ -51,7 +51,7 @@ class GeminiMarketAnalyzer:
             api_key: Google Gemini API key. If None, will try to load from environment.
             daily_limit: Daily request limit per model (default: 50 for free tier)
         """
-        self.api_key = api_key or os.getenv('AIzaSyBbWrXelA5WLJiedbqjp7j5M9QzmwA6tPk')
+        self.api_key = 'AIzaSyBbWrXelA5WLJiedbqjp7j5M9QzmwA6tPk'
         self.daily_limit = daily_limit
         self.request_count = 0
         self.last_reset_date = date.today()
