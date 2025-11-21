@@ -26,7 +26,7 @@ adx_limit= {'ETHUSDT':80,'BTCUSDT':40,'SOLUSDT':30,'XRPUSDT':40,"TONUSDT":30,'DO
 #these will be used to make asset specifice decsion on tp and sl multiplier
 
 # --- Configuration ---
-load_dotenv()  # Load environment variables from .env file
+load_dotenv()  
 API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
 API_SECRET = "bz1m4UlthzklqXlWoqAqXZiJE35jjT0g5uJ5cQ43vwDNnsIpPYS5OqevfBVz84iK"
 
