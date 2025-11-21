@@ -496,6 +496,110 @@ Respond ONLY in this JSON format:
         is_consolidating, _ = self.analyze_consolidation(df, symbol)
         return is_consolidating
 
+    def analyze_multi_timeframe_consolidation(self, 
+                                             df_ltf: pd.DataFrame, 
+                                             df_htf: pd.DataFrame, 
+                                             symbol: str, 
+                                             max_retries: int = 3) -> Tuple[bool, str]:
+        """
+        Analyze consolidation across both Lower Timeframe (LTF) and Higher Timeframe (HTF) in a SINGLE request.
+        
+        Args:
+            df_ltf: Lower timeframe DataFrame (e.g., 15m)
+            df_htf: Higher timeframe DataFrame (e.g., 4H)
+            symbol: Trading symbol
+            max_retries: Max retry attempts
+            
+        Returns:
+            Tuple of (is_consolidating: bool, reasoning: str)
+            Returns True (is consolidating) only if BOTH timeframes show issues or overall market is unsafe.
+            Returns False (is trending) if the market is suitable for trading.
+        """
+        if self.client is None:
+            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
+            return False, "Gemini client not initialized. Check API key."
+        
+        # Prepare market summaries
+        ltf_summary = self._prepare_market_summary(df_ltf, symbol)
+        htf_summary = self._prepare_market_summary(df_htf, symbol)
+        
+        prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes to determine if the asset is TRENDING or CONSOLIDATING.
+
+SYMBOL: {symbol}
+
+DATA 1: LOWER TIMEFRAME (15m) - Entry Timing
+{ltf_summary}
+
+DATA 2: HIGHER TIMEFRAME (4H/1H) - Trend Direction
+{htf_summary}
+
+Definitions:
+- CONSOLIDATION = range-bound, choppy, mixed structure, low momentum.
+- TRENDING = clear direction (uptrend/downtrend), consistent structure (HH/HL or LH/LL), strong momentum.
+
+Task:
+Synthesize both timeframes to decide if a trade is safe. 
+- If HTF is trending strongly but LTF is consolidating (bull flag), this might be safe (Trending).
+- If HTF is consolidating/choppy, the market is unsafe regardless of LTF (Consolidating).
+- If both are choppy, it is definitely Consolidating.
+
+Respond ONLY in this JSON format:
+{{
+  "is_consolidating": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "Concise explanation synthesizing both timeframes (e.g., 'HTF uptrend strong, LTF breakout confirmed')",
+  "key_factors": ["factor1", "factor2"]
+}}
+"""
+        
+        # Retry logic with model switching (same as single analysis)
+        for attempt in range(max_retries + 1):
+            if self.client is None:
+                return True, "No available models."
+            
+            current_model = self.current_model
+            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
+            
+            if current_model and model_count >= self.daily_limit:
+                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
+                if not self._switch_to_next_model():
+                    return True, "All models have reached daily quota limits."
+                continue
+            
+            try:
+                response = self.client.generate_content(prompt)
+                self._increment_request_count(current_model)
+                response_text = response.text.strip()
+                
+                # Extract JSON
+                json_str = response_text
+                if '```json' in json_str:
+                    json_str = json_str.split('```json')[1].split('```')[0]
+                elif '```' in json_str:
+                    json_str = json_str.split('```')[1]
+                json_str = json_str.strip()
+                
+                result = json.loads(json_str)
+                is_consolidating = bool(result.get('is_consolidating', True))
+                reasoning = result.get('reasoning', 'No reasoning provided')
+                confidence = result.get('confidence', 0.5)
+                
+                logger.info(f"Multi-TF Analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}")
+                return is_consolidating, reasoning
+                
+            except Exception as e:
+                if self._is_rate_limit_error(e):
+                    logger.warning(f"Rate limit error for {current_model}: {e}")
+                    if current_model: self.exhausted_models[current_model] = date.today()
+                    if attempt < max_retries:
+                         if self._switch_to_next_model(): continue
+                    return True, f"Rate limit exceeded: {e}"
+                else:
+                    logger.error(f"Error in Multi-TF analysis: {e}")
+                    return True, f"Error in analysis: {str(e)}"
+        
+        return True, "Failed after all retry attempts"
+
     def analyze_multiple_consolidations(self, analyses, max_retries: int = 3) -> Dict[str, Tuple[bool, str]]:
         """
         Batch analyze multiple markets for consolidation using Gemini in a SINGLE API call.
@@ -716,10 +820,10 @@ def check_market_consolidation(df: pd.DataFrame, symbol: str,
     Args:
         df: DataFrame with market data and indicators
         symbol: Trading symbol
-        api_key: Optional Gemini API key (if None, uses GEMINI_API_KEY from environment)
+        api_key: Optional Gemini API key (if None, uses default)
         
     Returns:
         bool: True if market is consolidating
     """
-    analyzer = GeminiMarketAnalyzer(api_key=self.api_key)
+    analyzer = GeminiMarketAnalyzer(api_key=api_key)
     return analyzer.is_market_consolidating(df, symbol)
