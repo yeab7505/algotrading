@@ -503,14 +503,14 @@ class ForwardIchimokuTrader:
 
     def _calculate_HTF_indicators(self):
         """Calculate indicators for HTF DataFrame."""
-        if self.df_HTF.empty or len(self.df_HTF) < 15:
+        
+        if self.df_HTF.empty or len(self.df_HTF) < 5:
             return
 
         try:
             # ATR
             self.df_HTF['atr'] = ta.atr(self.df_HTF['High'], self.df_HTF['Low'], self.df_HTF['Close'], length=14)
             
-            # Choppy
             self.df_HTF['choppy'] = ta.chop(self.df_HTF['High'], self.df_HTF['Low'], self.df_HTF['Close'])
             
             # ADX
@@ -524,7 +524,7 @@ class ForwardIchimokuTrader:
     def _fetch_initial_HTF_data(self) -> bool:
         self.logger.info(f"Fetching initial {self.lookback + 50} HTF klines for {self.symbol}...")
         try:
-            start = str(self._get_server_time() - timedelta(days=20)) 
+            start = str(self._get_server_time() - timedelta(days=10)) 
             
             klines = self.client.futures_historical_klines(symbol=self.symbol, interval=self.interval_HTF, start_str=start)
             klines = klines[:-1]
@@ -1536,20 +1536,29 @@ class ForwardIchimokuTrader:
                         price_precision = abs(Decimal(tick_size_str).as_tuple().exponent)
                     break
             
+            # Get latest ATR from dataframe to ensure we use current value
+            last_row = self.df.iloc[-1]
+            current_atr = last_row.get('atr', atr)
+            if pd.isna(current_atr) or current_atr is None or current_atr <= 0:
+                self.logger.error(f"Invalid ATR value: {current_atr}. Cannot calculate TP/SL levels.")
+                self._reset_position_state()
+                return
+            
             # Calculate TP/SL with actual entry price
             tp_base_multiplier = multiplier_set[self.symbol][0]
+            
             if direction == 1:
-                self.tp_level_3 = round(self.entry_price + (atr * tp_base_multiplier), price_precision)
-                self.tp_level_2 = round(self.entry_price + (atr * self.tp_2 * tp_base_multiplier), price_precision)
-                self.tp_level_1 = round(self.entry_price + (atr * self.tp_3 * tp_base_multiplier), price_precision)
+                self.tp_level_3 = round(self.entry_price + (current_atr * tp_base_multiplier), price_precision)
+                self.tp_level_2 = round(self.entry_price + (current_atr * self.tp_2 * tp_base_multiplier), price_precision)
+                self.tp_level_1 = round(self.entry_price + (current_atr * self.tp_3 * tp_base_multiplier), price_precision)
                 self.tp_level = self.tp_level_1  # Keep for backward compatibility
-                self.sl_level = round(self.entry_price - (atr * multiplier_set[self.symbol][1]), price_precision)
+                self.sl_level = round(self.entry_price - (current_atr * multiplier_set[self.symbol][1]), price_precision)
             else: # direction == -1
-                self.tp_level_3 = round(self.entry_price - (atr * tp_base_multiplier), price_precision)
-                self.tp_level_2 = round(self.entry_price - (atr * self.tp_2 * tp_base_multiplier), price_precision)
-                self.tp_level_1 = round(self.entry_price - (atr * self.tp_3 * tp_base_multiplier), price_precision)
+                self.tp_level_3 = round(self.entry_price - (current_atr * tp_base_multiplier), price_precision)
+                self.tp_level_2 = round(self.entry_price - (current_atr * self.tp_2 * tp_base_multiplier), price_precision)
+                self.tp_level_1 = round(self.entry_price - (current_atr * self.tp_3 * tp_base_multiplier), price_precision)
                 self.tp_level = self.tp_level_1  # Keep for backward compatibility
-                self.sl_level = round(self.entry_price + (atr * multiplier_set[self.symbol][1]), price_precision)
+                self.sl_level = round(self.entry_price + (current_atr * multiplier_set[self.symbol][1]), price_precision)
 
             # Place SL order
             sl_side = Client.SIDE_SELL if direction == 1 else Client.SIDE_BUY
