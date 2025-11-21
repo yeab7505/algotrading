@@ -30,11 +30,12 @@ DAILY_REQUEST_LIMIT = 200
 # Available models in order of preference (Flash models are faster/cheaper)
 # Free tier: 50 requests per day per model
 AVAILABLE_MODELS = [
-    'gemini-2.5-flash',      # Fastest, cheapest
+    'gemini-2.5-flash',
+    'gemini-2.5-pro', # Fastest, cheapest
     'gemini-2.0-flash-lite',  # Experimental flash
     'gemini-2.5-flash-lite',        # More capable
     'gemini-2.0-flash',      # Latest flash
-    'gemini-2.5-pro',        # Latest pro (most expensive)
+           # Latest pro (most expensive)
 ]
 
 class GeminiMarketAnalyzer:
@@ -720,5 +721,5 @@ def check_market_consolidation(df: pd.DataFrame, symbol: str,
     Returns:
         bool: True if market is consolidating
     """
-    analyzer = GeminiMarketAnalyzer(api_key='AIzaSyCNBu0XevUuUgfBGP8nplbWN8jnEL1YW9E')
+    analyzer = GeminiMarketAnalyzer(api_key='AIzaSyAdnPlmnau8tENZZNjHuvzDFNbcrMrUoNM')
     return analyzer.is_market_consolidating(df, symbol)
