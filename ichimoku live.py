@@ -26,7 +26,7 @@ adx_limit= {'ETHUSDT':80,'BTCUSDT':40,'SOLUSDT':30,'XRPUSDT':40,"TONUSDT":30,'DO
 #these will be used to make asset specifice decsion on tp and sl multiplier
 
 # --- Configuration ---
-load_dotenv()  
+load_dotenv()  # Load environment variables from .env file
 API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
 API_SECRET = "bz1m4UlthzklqXlWoqAqXZiJE35jjT0g5uJ5cQ43vwDNnsIpPYS5OqevfBVz84iK"
 
@@ -861,16 +861,61 @@ class ForwardIchimokuTrader:
         if buy_signal or sell_signal:
             try:
                 if hasattr(self, 'gemini') and self.gemini is not None:
-                    is_consolidating, reasoning = self.gemini.analyze_consolidation(
-                        df=self.df_HTF,
-                        symbol=self.symbol
-                    )
+                    # Prepare both HTF and LTF (15m) analyses for BATCH processing
+                    # This sends BOTH timeframes in a SINGLE API request
+                    analyses = [
+                        (self.df_HTF, self.symbol, "Higher Timeframe (4H) Analysis. Important for trend direction."),
+                        (self.df, self.symbol, "Lower Timeframe (15m) Analysis. Important for entry timing.")
+                    ]
                     
-                    if is_consolidating:
+                    # Use batch analysis to check both timeframes efficiently
+                    # Returns a dict keyed by symbol. Since we have the same symbol twice,
+                    # we need to handle this carefully. The GeminiMarketAnalyzer doesn't natively support
+                    # duplicate symbols well in the return dict if not using unique keys.
+                    # 
+                    # Hack: Append a suffix to the symbol for the context to differentiate in the batch processor if needed,
+                    # BUT GeminiMarketAnalyzer uses the symbol as key.
+                    #
+                    # Let's look at GeminiMarketAnalyzer.analyze_multiple_consolidations implementation.
+                    # It keys by the symbol passed in the tuple.
+                    # So we should pass distinct "symbols" to the analyzer to get distinct results back.
+                    
+                    htf_key = f"{self.symbol}_HTF"
+                    ltf_key = f"{self.symbol}_LTF"
+                    
+                    batch_analyses = [
+                        (self.df_HTF, htf_key, "Higher Timeframe (4H) Analysis. Important for trend direction."),
+                        (self.df, ltf_key, "Lower Timeframe (15m) Analysis. Important for entry timing.")
+                    ]
+                    
+                    results = self.gemini.analyze_multiple_consolidations(batch_analyses)
+                    
+                    # Retrieve results using our unique keys
+                    is_htf_consolidating, htf_reason = results.get(htf_key, (True, "Analysis failed"))
+                    is_ltf_consolidating, ltf_reason = results.get(ltf_key, (True, "Analysis failed"))
+
+                    if is_htf_consolidating:
                         self.logger.warning(
-                            f"🧠 Gemini detected consolidation for {self.symbol}: {reasoning}. "
-                            f"Trade BLOCKED despite signal."
+                            f"🧠 Gemini detected HTF consolidation for {self.symbol}: {htf_reason}. "
+                            f"Trade BLOCKED."
                         )
+                        block_reason = f"HTF Consolidation: {htf_reason}"
+                        should_block = True
+                    elif is_ltf_consolidating:
+                         self.logger.warning(
+                            f"🧠 Gemini detected LTF consolidation for {self.symbol}: {ltf_reason}. "
+                            f"Trade BLOCKED."
+                        )
+                         block_reason = f"LTF Consolidation: {ltf_reason}"
+                         should_block = True
+                    else:
+                        self.logger.info(
+                            f"🧠 Gemini confirmed trending market for {self.symbol} on both HTF and LTF. "
+                            f"HTF: {htf_reason}, LTF: {ltf_reason}. Trade ALLOWED."
+                        )
+                        should_block = False
+                    
+                    if should_block:
                         # Send Telegram notification about blocked trade
                         try:
                             if 'telegram_reporter' in globals() and telegram_reporter:
@@ -879,20 +924,14 @@ class ForwardIchimokuTrader:
                                 telegram_reporter.send(
                                     f"⚠️ <b>Trade Blocked</b> - <code>{self.symbol}</code>\n"
                                     f"Signal: {signal_type} @ ${price:.4f}\n"
-                                    f"Reason: Market is consolidating\n"
-                                    f"💡 {reasoning}"
+                                    f"Reason: {block_reason}"
                                 )
                         except Exception as e:
                             self.logger.error(f"Failed to send Telegram notification: {e}")
                         
                         return False, False
                     else:
-                        self.logger.info(
-                            f"🧠 Gemini confirmed trending market for {self.symbol}: {reasoning}. "
-                            f"Trade ALLOWED."
-                        )
                         # Optional: Send Telegram notification about allowed trade
-                        # Uncomment if you want to be notified of all Gemini decisions
                         try:
                              if 'telegram_reporter' in globals() and telegram_reporter:
                                  signal_type = "BUY" if buy_signal else "SELL"
@@ -900,8 +939,9 @@ class ForwardIchimokuTrader:
                                  telegram_reporter.send(
                                      f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
                                      f"Signal: {signal_type} @ ${price:.4f}\n"
-                                     f"Status: Market is trending\n"
-                                     f"💡 {reasoning}"
+                                     f"Status: Trending on HTF & LTF\n"
+                                     f"💡 HTF: {htf_reason}\n"
+                                     f"💡 LTF: {ltf_reason}"
                                  )
                         except Exception as e:
                              self.logger.error(f"Failed to send Telegram notification: {e}")
