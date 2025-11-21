@@ -392,7 +392,7 @@ Definitions:
 
 Task:
 Synthesize both timeframes to decide if a trade is safe. 
-- If HTF is trending strongly but LTF is consolidating (bull flag), this might be safe (Trending) but still needs to be confirmed by the LTF, allow the trade if you are very very confident in the HFT.
+- If HTF is trending strongly but LTF is consolidating wait for the LTF to break out.
 - If HTF is consolidating/choppy, the market is unsafe regardless of LTF (Consolidating).
 - If both are choppy, it is definitely Consolidating.
 
