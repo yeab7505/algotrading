@@ -353,20 +353,25 @@ Recent Price Action (Last 5 candles):
                                              df_ltf: pd.DataFrame, 
                                              df_htf: pd.DataFrame, 
                                              symbol: str, 
+                                             trade_side: str,
                                              max_retries: int = 3) -> Tuple[bool, str]:
         """
         Analyze consolidation across both Lower Timeframe (LTF) and Higher Timeframe (HTF) in a SINGLE request.
+        Also checks if the trade direction is safe given the HTF trend.
         
         Args:
             df_ltf: Lower timeframe DataFrame (e.g., 15m)
             df_htf: Higher timeframe DataFrame (e.g., 4H)
             symbol: Trading symbol
+            trade_side: 'BUY' or 'SELL'
             max_retries: Max retry attempts
             
         Returns:
-            Tuple of (is_consolidating: bool, reasoning: str)
-            Returns True (is consolidating) only if BOTH timeframes show issues or overall market is unsafe.
-            Returns False (is trending) if the market is suitable for trading.
+            Tuple of (is_unsafe: bool, reasoning: str)
+            Returns True (unsafe/consolidating) if:
+                - Market is consolidating/choppy
+                - Trade direction contradicts strong HTF trend
+            Returns False (safe/trending) if the market is suitable for the proposed trade.
         """
         if self.client is None:
             logger.error("Gemini client not initialized. Cannot analyze consolidation.")
@@ -376,9 +381,10 @@ Recent Price Action (Last 5 candles):
         ltf_summary = self._prepare_market_summary(df_ltf, symbol)
         htf_summary = self._prepare_market_summary(df_htf, symbol)
         
-        prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes to determine if the asset is TRENDING or CONSOLIDATING.
+        prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes to determine if a {trade_side} trade is safe.
 
 SYMBOL: {symbol}
+PROPOSED TRADE: {trade_side}
 
 DATA 1: LOWER TIMEFRAME (15m) - Entry Timing
 {ltf_summary}
@@ -391,16 +397,20 @@ Definitions:
 - TRENDING = clear direction (uptrend/downtrend), consistent structure (HH/HL or LH/LL), strong momentum.
 
 Task:
-Synthesize both timeframes to decide if a trade is safe. 
-- If HTF is trending strongly but LTF is consolidating wait for the LTF to break out.
-- If HTF is consolidating/choppy, the market is unsafe regardless of LTF (Consolidating).
-- If both are choppy, it is definitely Consolidating.
+Synthesize both timeframes to decide if a {trade_side} trade is safe.
+1. CHECK ALIGNMENT: Is the 15m {trade_side} signal aligned with the 4H trend?
+   - If 4H is Uptrend and trade is SELL -> UNSAFE (Counter-trend).
+   - If 4H is Downtrend and trade is BUY -> UNSAFE (Counter-trend).
+2. CHECK CONSOLIDATION:
+   - If 4H is consolidating/choppy -> UNSAFE.
+   - If 4H is trending strongly but 15m is consolidating (flag) -> WAIT for breakout (UNSAFE until clear).
+   - If both are choppy -> UNSAFE.
 
 Respond ONLY in this JSON format:
 {{
-  "is_consolidating": true/false,
+  "is_unsafe": true/false,
   "confidence": 0.0-1.0,
-  "reasoning": "Concise explanation synthesizing both timeframes (e.g., 'HTF uptrend strong, LTF breakout confirmed')",
+  "reasoning": "Concise explanation. Mention trend alignment (e.g., '4H Uptrend supports BUY' or '4H Downtrend contradicts BUY').",
   "key_factors": ["factor1", "factor2"]
 }}
 """
@@ -433,12 +443,14 @@ Respond ONLY in this JSON format:
                 json_str = json_str.strip()
                 
                 result = json.loads(json_str)
-                is_consolidating = bool(result.get('is_consolidating', True))
+                # The bot expects "is_consolidating" = True to BLOCK trade.
+                # So we map "is_unsafe" to that.
+                is_unsafe = bool(result.get('is_unsafe', True))
                 reasoning = result.get('reasoning', 'No reasoning provided')
                 confidence = result.get('confidence', 0.5)
                 
-                logger.info(f"Multi-TF Analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}")
-                return is_consolidating, reasoning
+                logger.info(f"Multi-TF Analysis for {symbol} {trade_side} ({current_model}): Unsafe={is_unsafe}, Confidence={confidence:.2f}")
+                return is_unsafe, reasoning
                 
             except Exception as e:
                 if self._is_rate_limit_error(e):
