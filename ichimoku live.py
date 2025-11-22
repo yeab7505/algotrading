@@ -861,27 +861,30 @@ class ForwardIchimokuTrader:
         if buy_signal or sell_signal:
             try:
                 if hasattr(self, 'gemini') and self.gemini is not None:
+                    # Determine proposed trade side
+                    trade_side = 'BUY' if buy_signal else 'SELL'
+                    
                     # Use the new Multi-Timeframe Analysis (Single API Request)
                     is_consolidating, reasoning = self.gemini.analyze_multi_timeframe_consolidation(
                         df_ltf=self.df,
                         df_htf=self.df_HTF,
-                        symbol=self.symbol
+                        symbol=self.symbol,
+                        trade_side=trade_side
                     )
 
                     if is_consolidating:
                         self.logger.warning(
-                            f"🧠 Gemini detected consolidation for {self.symbol} (Multi-TF Analysis): {reasoning}. "
+                            f"🧠 Gemini blocked {trade_side} trade for {self.symbol} (Multi-TF Analysis): {reasoning}. "
                             f"Trade BLOCKED."
                         )
                         # Send Telegram notification about blocked trade
                         try:
                             if 'telegram_reporter' in globals() and telegram_reporter:
-                                signal_type = "BUY" if buy_signal else "SELL"
                                 price = self.df['Close'].iloc[-1]
                                 telegram_reporter.send(
                                     f"⚠️ <b>Trade Blocked</b> - <code>{self.symbol}</code>\n"
-                                    f"Signal: {signal_type} @ ${price:.4f}\n"
-                                    f"Reason: Market is consolidating (Multi-TF)\n"
+                                    f"Signal: {trade_side} @ ${price:.4f}\n"
+                                    f"Reason: Unsafe Market Condition\n"
                                     f"💡 {reasoning}"
                                 )
                         except Exception as e:
@@ -890,17 +893,16 @@ class ForwardIchimokuTrader:
                         return False, False
                     else:
                         self.logger.info(
-                            f"🧠 Gemini confirmed trending market for {self.symbol} (Multi-TF Analysis): {reasoning}. "
+                            f"🧠 Gemini confirmed {trade_side} trade for {self.symbol} (Multi-TF Analysis): {reasoning}. "
                             f"Trade ALLOWED."
                         )
                         # Optional: Send Telegram notification about allowed trade
                         try:
                              if 'telegram_reporter' in globals() and telegram_reporter:
-                                 signal_type = "BUY" if buy_signal else "SELL"
                                  price = self.df['Close'].iloc[-1]
                                  telegram_reporter.send(
                                      f"✅ <b>Trade Allowed</b> - <code>{self.symbol}</code>\n"
-                                     f"Signal: {signal_type} @ ${price:.4f}\n"
+                                     f"Signal: {trade_side} @ ${price:.4f}\n"
                                      f"Status: Trending (Multi-TF Confirmed)\n"
                                      f"💡 {reasoning}"
                                  )
