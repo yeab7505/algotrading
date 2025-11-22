@@ -27,8 +27,8 @@ adx_limit= {'ETHUSDT':80,'BTCUSDT':40,'SOLUSDT':30,'XRPUSDT':40,"TONUSDT":30,'DO
 
 # --- Configuration ---
 load_dotenv()  # Load environment variables from .env file
-API_KEY = "iOgcObLOw4UIFSvvEPXLFP1vgwp1wzyHYfw57vd1vrg19Xt6SXCE4RywDi5QoM28"
-API_SECRET = "bz1m4UlthzklqXlWoqAqXZiJE35jjT0g5uJ5cQ43vwDNnsIpPYS5OqevfBVz84iK"
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 
 if not API_KEY or not API_SECRET:
@@ -394,7 +394,7 @@ class ForwardIchimokuTrader:
 
         # Initialize Gemini AI analyzer for consolidation detection
         try:
-            self.gemini = GeminiMarketAnalyzer(api_key='AIzaSyAdyo9u1iFoyoqSXCG3h38ADtuZHmc85vg')
+            self.gemini = GeminiMarketAnalyzer()
             self.logger.info("Gemini AI analyzer initialized successfully")
         except Exception as e:
             self.logger.warning(f"Failed to initialize Gemini AI: {e}")
@@ -869,7 +869,7 @@ class ForwardIchimokuTrader:
                     )
 
                     if is_consolidating:
-                        self.logger.info(
+                        self.logger.warning(
                             f"🧠 Gemini detected consolidation for {self.symbol} (Multi-TF Analysis): {reasoning}. "
                             f"Trade BLOCKED."
                         )
