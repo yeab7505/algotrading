@@ -873,7 +873,7 @@ class ForwardIchimokuTrader:
                     )
 
                     if is_consolidating:
-                        self.logger.warning(
+                        self.logger.info(
                             f"🧠 Gemini blocked {trade_side} trade for {self.symbol} (Multi-TF Analysis): {reasoning}. "
                             f"Trade BLOCKED."
                         )
