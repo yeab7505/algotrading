@@ -405,7 +405,52 @@ Synthesize both timeframes to decide if a {trade_side} trade is safe.
    - If 1H is consolidating/choppy -> UNSAFE.
    - If 1H is trending strongly but 15m is consolidating (flag) -> WAIT for breakout (UNSAFE until clear).
    - If both are choppy -> UNSAFE.
+BUT IF THERE IS VERY STRONG TREND REVERSAL IN THE 15M TIMEFRAME, THEN IT IS SAFE TO TRADE.JUST BE 100% SURE IF IT IS A REVERAL OR NOT
 
+what is trend reversal and it's characteristics?
+- Trend reversal is a change in the direction of the trend.
+- A. Break of Market Structure (BMS)
+
+    In an uptrend, price forms higher highs (HH) and higher lows (HL).
+    If price breaks below the last higher low, the structure flips → Downtrend begins.
+-B. Momentum Shift (Candle Strength)
+
+    Look for:
+
+    Large opposite-direction candles
+    Strong volume spike during opposite candles
+    Weak continuation candles during the old trend
+
+- C. Supply & Demand Zones
+    Reversal probability is high if:
+    - Uptrend hits a strong supply zone → reversal down
+    - Downtrend hits a strong demand zone → reversal up
+- D. Volume Confirmation
+    Reversal = volume shift:
+    - Rising volume in the opposite direction
+    - Falling volume in the previous direction
+    
+Sign of pullback:
+- A. Pullback Has Weak Momentum
+    - Signs:
+        - Small candles
+        - Low volume
+        - Slow movement
+        - Wicky candles
+        - Reversal = strong opposite momentum
+        - Pullback = weak opposite momentum
+B. Price Does NOT Break Structure
+    - In an uptrend:
+        - Pullback will not break the previous HL
+        - Instead, it forms a new HL before continuing up
+    - In a downtrend:
+        - Pullback stays below previous LH
+        - If structure is not broken → pullback, not reversal.
+
+- E. Pullback Ends at a Trendline
+
+If trendline is respected → pullback
+If trendline breaks → early sign of reversal
 Respond ONLY in this JSON format:
 {{
   "is_unsafe": true/false,
