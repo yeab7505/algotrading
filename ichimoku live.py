@@ -48,7 +48,7 @@ SP_MULTIPLIER = 3.5
 LEVERAGE = 2
 TC = 0.0005
 
-ASSETS = ['SANDUSDT','VETUSDT']
+ASSETS = ['SANDUSDT','1000BONKUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
 active_trades = []
@@ -1112,31 +1112,13 @@ class ForwardIchimokuTrader:
                     original_position_side = 'BUY' if self.position == 1 else 'SELL'
 
                     if self.position == 1:
-                        # Check TP levels in order: TP1 (closest), TP2, TP3 (furthest)
-                        if self.tp_level_1 is not None and last_high >= self.tp_level_1:
-                            exit_reason = 'TP1'
-                            exit_price = self.tp_level_1
-                            if self.tp_level_2 is not None and last_high >= self.tp_level_2:
-                                exit_reason = 'TP2'
-                                exit_price = self.tp_level_2
-                                if self.tp_level_3 is not None and last_high >= self.tp_level_3:
-                                    exit_reason = 'TP3'
-                                    exit_price = self.tp_level_3
-                        elif last_low <= self.sl_level:
+                        # Only check SL in fallback. TPs should be handled by order fills to avoid premature full closure.
+                        if last_low <= self.sl_level:
                             exit_reason = 'SL'
                             exit_price = self.sl_level
                     elif self.position == -1:
-                        # Check TP levels in order: TP1 (closest), TP2, TP3 (furthest)
-                        if self.tp_level_1 is not None and last_low <= self.tp_level_1:
-                            exit_reason = 'TP1'
-                            exit_price = self.tp_level_1
-                            if self.tp_level_2 is not None and last_low <= self.tp_level_2:
-                                exit_reason = 'TP2'
-                                exit_price = self.tp_level_2
-                                if self.tp_level_3 is not None and last_low <= self.tp_level_3:
-                                    exit_reason = 'TP3'
-                                    exit_price = self.tp_level_3
-                        elif last_high >= self.sl_level:
+                        # Only check SL in fallback. TPs should be handled by order fills to avoid premature full closure.
+                        if last_high >= self.sl_level:
                             exit_reason = 'SL'
                             exit_price = self.sl_level
 
