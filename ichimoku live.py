@@ -48,7 +48,7 @@ SP_MULTIPLIER = 3.5
 LEVERAGE = 2
 TC = 0.0005
 
-ASSETS = ['SANDUSDT','1000BONKUSDT']
+ASSETS = ['SANDUSDT','VETUSDT']
 MAX_TRENDING_ASSETS = 0  # Maximum number of trending assets to trade
 MAX_CONCURRENT_TRADES = 2  # Set this to the desired number of concurrent trades
 active_trades = []
@@ -1068,15 +1068,35 @@ class ForwardIchimokuTrader:
                     
                     # Reset position state only if fully closed (SL or last TP)
                     if not is_partial_close:
+                        # Cancel any remaining SL/TP orders since position is fully closed
+                        try:
+                            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+                            cancelled_count = 0
+                            for order in open_orders:
+                                if order['reduceOnly']:
+                                    self.client.futures_cancel_order(symbol=self.symbol, orderId=order['orderId'])
+                                    self.logger.info(f"Cancelled remaining {order['type']} order {order['orderId']} after full position close")
+                                    cancelled_count += 1
+                            if cancelled_count > 0:
+                                self.logger.info(f"Cancelled {cancelled_count} remaining order(s) (SL/TP) after position fully closed")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to cancel remaining orders: {e}")
+                        
                         self.position = 0
                         self.entry_price = 0.0
                         self.position_size = 0.0
                         self.tp_level = None
+                        self.tp_level_1 = None
+                        self.tp_level_2 = None
+                        self.tp_level_3 = None
                         self.sl_level = None
                         self.highest_price_since_entry = None
                         self.lowest_price_since_entry = None
                         self.orderid = None
                         self.tp_orderid = None
+                        self.tp_orderid_1 = None
+                        self.tp_orderid_2 = None
+                        self.tp_orderid_3 = None
                         
                         # Remove from active trades
                         with active_trades_lock:
@@ -1090,6 +1110,76 @@ class ForwardIchimokuTrader:
                             self.logger.info("Trading status printed successfully")
                         except Exception as e:
                             self.logger.error(f"Could not print trading status: {e}")
+            
+            # After processing all orders, check if position is fully closed (all TPs filled)
+            # This handles the case where all 3 TPs are filled but position_size wasn't properly tracked
+            if hit_detected_via_orders and self.position != 0:
+                try:
+                    # Explicitly check if all 3 TP orders are filled
+                    all_tps_filled = False
+                    if self.tp_orderid_1 and self.tp_orderid_2 and self.tp_orderid_3:
+                        # Check if all 3 TP order IDs are in processed_orders (meaning they were filled)
+                        all_tps_filled = (
+                            self.tp_orderid_1 in self.processed_orders and
+                            self.tp_orderid_2 in self.processed_orders and
+                            self.tp_orderid_3 in self.processed_orders
+                        )
+                        if all_tps_filled:
+                            self.logger.info(f"All 3 TP orders confirmed filled for {self.symbol}: TP1={self.tp_orderid_1}, TP2={self.tp_orderid_2}, TP3={self.tp_orderid_3}")
+                    
+                    # Also verify with exchange that position is actually closed
+                    positions = self.client.futures_position_information()
+                    active_position = next((p for p in positions if p['symbol'] == self.symbol and float(p['positionAmt']) != 0), None)
+                    
+                    if not active_position or all_tps_filled:
+                        # Position is closed on exchange or all TPs are confirmed filled - clean up
+                        reason = "all 3 TPs confirmed filled" if all_tps_filled else "position closed on exchange"
+                        self.logger.info(f"Position for {self.symbol} fully closed ({reason}). Cleaning up remaining orders and resetting state.")
+                        
+                        # Cancel any remaining SL/TP orders (especially SL since all TPs are filled)
+                        try:
+                            open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+                            cancelled_count = 0
+                            for order in open_orders:
+                                if order['reduceOnly']:
+                                    self.client.futures_cancel_order(symbol=self.symbol, orderId=order['orderId'])
+                                    self.logger.info(f"Cancelled remaining {order['type']} order {order['orderId']} (position fully closed)")
+                                    cancelled_count += 1
+                            if cancelled_count > 0:
+                                self.logger.info(f"Cancelled {cancelled_count} remaining order(s) (SL/TP) - all TPs filled, position closed")
+                            else:
+                                self.logger.debug(f"No remaining orders to cancel for {self.symbol}")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to cancel remaining orders: {e}")
+                        
+                        # Reset state
+                        self.position = 0
+                        self.entry_price = 0.0
+                        self.position_size = 0.0
+                        self.tp_level = None
+                        self.tp_level_1 = None
+                        self.tp_level_2 = None
+                        self.tp_level_3 = None
+                        self.sl_level = None
+                        self.highest_price_since_entry = None
+                        self.lowest_price_since_entry = None
+                        self.orderid = None
+                        self.tp_orderid = None
+                        self.tp_orderid_1 = None
+                        self.tp_orderid_2 = None
+                        self.tp_orderid_3 = None
+                        
+                        with active_trades_lock:
+                            if self in active_trades:
+                                active_trades.remove(self)
+                                self.logger.info(f"Removed {self.symbol} from active trades after detecting full closure")
+                        
+                        try:
+                            print_trading_status()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    self.logger.error(f"Error checking position status after order processing: {e}")
             
             # Check if position is still active on exchange (after processing orders)
             if self.position != 0 and not hit_detected_via_orders:
