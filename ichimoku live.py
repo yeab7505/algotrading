@@ -41,7 +41,7 @@ tradereport = pd.DataFrame(columns=['symbol', 'side', 'entry_price', 'tp_price',
 
 # Trading parameters
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE
-INTERVAL_HTF = Client.KLINE_INTERVAL_4HOUR
+INTERVAL_HTF = Client.KLINE_INTERVAL_1HOUR
 LOOKBACK_PERIODS = 100
 TP_MULTIPLIER = 1
 SP_MULTIPLIER = 3.5
