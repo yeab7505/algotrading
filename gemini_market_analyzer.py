@@ -361,7 +361,7 @@ Recent Price Action (Last 5 candles):
         
         Args:
             df_ltf: Lower timeframe DataFrame (e.g., 15m)
-            df_htf: Higher timeframe DataFrame (e.g., 4H)
+            df_htf: Higher timeframe DataFrame (e.g., 1H)
             symbol: Trading symbol
             trade_side: 'BUY' or 'SELL'
             max_retries: Max retry attempts
@@ -389,7 +389,7 @@ PROPOSED TRADE: {trade_side}
 DATA 1: LOWER TIMEFRAME (15m) - Entry Timing
 {ltf_summary}
 
-DATA 2: HIGHER TIMEFRAME (4H) - Trend Direction
+DATA 2: HIGHER TIMEFRAME (1H) - Trend Direction
 {htf_summary}
 
 Definitions:
@@ -398,19 +398,19 @@ Definitions:
 
 Task:
 Synthesize both timeframes to decide if a {trade_side} trade is safe.
-1. CHECK ALIGNMENT: Is the 15m {trade_side} signal aligned with the 4H trend?
-   - If 4H is Uptrend and trade is SELL -> UNSAFE (Counter-trend).
-   - If 4H is Downtrend and trade is BUY -> UNSAFE (Counter-trend).
+1. CHECK ALIGNMENT: Is the 15m {trade_side} signal aligned with the 1H trend?
+   - If 1H is Uptrend and trade is SELL -> UNSAFE (Counter-trend).
+   - If 1H is Downtrend and trade is BUY -> UNSAFE (Counter-trend).
 2. CHECK CONSOLIDATION:
-   - If 4H is consolidating/choppy -> UNSAFE.
-   - If 4H is trending strongly but 15m is consolidating (flag) -> WAIT for breakout (UNSAFE until clear).
+   - If 1H is consolidating/choppy -> UNSAFE.
+   - If 1H is trending strongly but 15m is consolidating (flag) -> WAIT for breakout (UNSAFE until clear).
    - If both are choppy -> UNSAFE.
 
 Respond ONLY in this JSON format:
 {{
   "is_unsafe": true/false,
   "confidence": 0.0-1.0,
-  "reasoning": "Concise explanation. Mention trend alignment (e.g., '4H Uptrend supports BUY' or '4H Downtrend contradicts BUY').",
+  "reasoning": "Concise explanation. Mention trend alignment (e.g., '1H Uptrend supports BUY' or '1H Downtrend contradicts BUY').",
   "key_factors": ["factor1", "factor2"]
 }}
 """
