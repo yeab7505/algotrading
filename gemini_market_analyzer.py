@@ -406,7 +406,7 @@ Synthesize both timeframes to decide if a {trade_side} trade is safe.
    - If 1H is trending strongly but 15m is consolidating (flag) -> WAIT for breakout (UNSAFE until clear).
    - If both are choppy -> UNSAFE.
 BUT IF THERE IS VERY STRONG TREND REVERSAL IN THE 15M TIMEFRAME, THEN IT IS SAFE TO TRADE.JUST BE 100% SURE IF IT IS A REVERAL OR NOT
-
+Note: Since the provided data uses closed candles, 1-hour aggregates may mask specific price action and volume spikes visible in 15-minute intervals (e.g., HH:15, HH:30, HH:45).
 what is trend reversal and it's characteristics?
 - Trend reversal is a change in the direction of the trend.
 - A. Break of Market Structure (BMS)
