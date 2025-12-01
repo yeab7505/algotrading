@@ -1638,7 +1638,22 @@ class ForwardIchimokuTrader:
             # Place SL order
             sl_side = Client.SIDE_SELL if direction == 1 else Client.SIDE_BUY
             tp_side = sl_side
-            tp_quantity = round(self.position_size / 3, qty_precision)
+
+            # Split the position size into 3 TP chunks that exactly sum to the full size,
+            # even when the quantity is not evenly divisible by 3.
+            if qty_precision > 0:
+                base_unit = 10 ** (-qty_precision)
+            else:
+                base_unit = 1.0
+
+            total_units = round(self.position_size / base_unit)
+            tp1_units = total_units // 3
+            tp2_units = total_units // 3
+            tp3_units = total_units - tp1_units - tp2_units
+
+            tp_qty_1 = tp1_units * base_unit
+            tp_qty_2 = tp2_units * base_unit
+            tp_qty_3 = tp3_units * base_unit
 
             try:
                 sl_params = {
@@ -1651,38 +1666,38 @@ class ForwardIchimokuTrader:
             except Exception as e:
                 self.logger.error(f"FAILED TO PLACE SL ORDER. Error: {e}", exc_info=True)
 
-            # Place 3 TP orders (each for 1/3 of position)
+            # Place 3 TP orders using the split quantities
             try:
                 tp1_params = {
                     'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
-                    'quantity': tp_quantity, 'stopPrice': self.tp_level_1, 'reduceOnly': True
+                    'quantity': tp_qty_1, 'stopPrice': self.tp_level_1, 'reduceOnly': True
                 }
                 tp1_order = self.client.futures_create_order(**tp1_params)
                 self.tp_orderid_1 = tp1_order['orderId']
                 self.tp_orderid = self.tp_orderid_1  # Keep for backward compatibility
-                self.logger.info(f"SUCCESS: Take profit order 1 placed. ID: {self.tp_orderid_1}, Price: {self.tp_level_1}, Qty: {tp_quantity}")
+                self.logger.info(f"SUCCESS: Take profit order 1 placed. ID: {self.tp_orderid_1}, Price: {self.tp_level_1}, Qty: {tp_qty_1}")
             except Exception as e:
                 self.logger.error(f"FAILED TO PLACE TP1 ORDER. Error: {e}", exc_info=True)
 
             try:
                 tp2_params = {
                     'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
-                    'quantity': tp_quantity, 'stopPrice': self.tp_level_2, 'reduceOnly': True
+                    'quantity': tp_qty_2, 'stopPrice': self.tp_level_2, 'reduceOnly': True
                 }
                 tp2_order = self.client.futures_create_order(**tp2_params)
                 self.tp_orderid_2 = tp2_order['orderId']
-                self.logger.info(f"SUCCESS: Take profit order 2 placed. ID: {self.tp_orderid_2}, Price: {self.tp_level_2}, Qty: {tp_quantity}")
+                self.logger.info(f"SUCCESS: Take profit order 2 placed. ID: {self.tp_orderid_2}, Price: {self.tp_level_2}, Qty: {tp_qty_2}")
             except Exception as e:
                 self.logger.error(f"FAILED TO PLACE TP2 ORDER. Error: {e}", exc_info=True)
 
             try:
                 tp3_params = {
                     'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
-                    'quantity': tp_quantity, 'stopPrice': self.tp_level_3, 'reduceOnly': True
+                    'quantity': tp_qty_3, 'stopPrice': self.tp_level_3, 'reduceOnly': True
                 }
                 tp3_order = self.client.futures_create_order(**tp3_params)
                 self.tp_orderid_3 = tp3_order['orderId']
-                self.logger.info(f"SUCCESS: Take profit order 3 placed. ID: {self.tp_orderid_3}, Price: {self.tp_level_3}, Qty: {tp_quantity}")
+                self.logger.info(f"SUCCESS: Take profit order 3 placed. ID: {self.tp_orderid_3}, Price: {self.tp_level_3}, Qty: {tp_qty_3}")
             except Exception as e:
                 self.logger.error(f"FAILED TO PLACE TP3 ORDER. Error: {e}", exc_info=True)
 
