@@ -1459,18 +1459,26 @@ class ForwardIchimokuTrader:
             # --- Start of actual trade execution ---
             self.logger.info(f"Step 1: Starting position entry process")
             
-            # Get available balance from futures account
-            self.logger.info(f"Step 5: Getting futures account balance...")
-            available_balance = self.client.futures_account_balance()
-            usdt_balance = 0
-            for balance in available_balance:
+            # Get total USDT equity (wallet balance) from futures account
+            self.logger.info("Step 5: Getting futures account balance (total USDT equity)...")
+            account_balances = self.client.futures_account_balance()
+            total_usdt_equity = 0.0
+            available_usdt = 0.0
+            for balance in account_balances:
                 if balance['asset'] == 'USDT':
-                    usdt_balance = float(balance['availableBalance'])  # Use availableBalance instead of balance
+                    # 'balance' is the total wallet balance (includes margin + PnL),
+                    # 'availableBalance' is the free balance not locked in positions.
+                    total_usdt_equity = float(balance.get('balance', 0.0))
+                    available_usdt = float(balance.get('availableBalance', 0.0))
                     break
-            self.logger.info(f"Step 6: Account balance retrieved: {usdt_balance} USDT")
+
+            self.logger.info(
+                f"Step 6: Futures wallet equity: {total_usdt_equity} USDT, "
+                f"available balance: {available_usdt} USDT"
+            )
             
-            if usdt_balance < 1:
-                self.logger.warning(f"Insufficient balance ({usdt_balance} USDT) for trading. Skipping entry.")
+            if total_usdt_equity < 1:
+                self.logger.warning(f"Insufficient total equity ({total_usdt_equity} USDT) for trading. Skipping entry.")
                 self._reset_position_state() # Release our reserved slot
                 return
 
@@ -1503,7 +1511,7 @@ class ForwardIchimokuTrader:
                 self._reset_position_state()
                 return
                     
-            self.logger.info(f"Step 14: Calculating position size...")
+            self.logger.info(f"Step 14: Calculating position size based on total USDT equity...")
             # Determine trade capital based on allocation mode
             active_count_before = max(len(active_trades) - 1, 0)
             if ALLOCATION_MODE == 'fixed_per_slot':
@@ -1514,7 +1522,9 @@ class ForwardIchimokuTrader:
             else:  # 'full_available'
                 denominator = 1
 
-            trade_capital = usdt_balance / denominator
+            # Use total account equity so position sizing is stable even when
+            # part of the capital is locked in open positions with multiple TPs.
+            trade_capital = total_usdt_equity / denominator
 
             if leverage_to_set==1:
                 margin_to_use = trade_capital * 0.95
