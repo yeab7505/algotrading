@@ -1530,7 +1530,17 @@ class ForwardIchimokuTrader:
                 margin_to_use = trade_capital * 0.95
             else:
                 margin_to_use = trade_capital * 0.95
-            self.logger.info(f"Capital per trade: {trade_capital:.2f} USDT. Margin to use: {margin_to_use:.2f} USDT")
+            
+            # Cap margin to available balance to avoid "insufficient margin" errors
+            # This ensures we don't try to use more margin than is actually available
+            margin_to_use = min(margin_to_use, available_usdt * 0.95)
+            
+            self.logger.info(
+                f"Capital per trade: {trade_capital:.2f} USDT. "
+                f"Desired margin: {trade_capital * 0.95:.2f} USDT. "
+                f"Available balance: {available_usdt:.2f} USDT. "
+                f"Margin to use (capped): {margin_to_use:.2f} USDT"
+            )
             
             # Calculate the notional value of the position using the correct leverage
             notional_value = margin_to_use * leverage_to_set
