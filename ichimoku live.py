@@ -1513,18 +1513,18 @@ class ForwardIchimokuTrader:
                     
             self.logger.info(f"Step 14: Calculating position size based on total USDT equity...")
             # Determine trade capital based on allocation mode
-            active_count_before = max(len(active_trades) - 1, 0)
+            """active_count_before = max(len(active_trades) - 1, 0)
             if ALLOCATION_MODE == 'fixed_per_slot':
                 denominator = max(int(MAX_CONCURRENT_TRADES), 1)
             elif ALLOCATION_MODE == 'dynamic_remaining':
                 # Divide by remaining slots given currently active trades BEFORE this entry
                 denominator = max(int(MAX_CONCURRENT_TRADES) - active_count_before, 1)
             else:  # 'full_available'
-                denominator = 1
+                denominator = 1"""
 
             # Use total account equity so position sizing is stable even when
             # part of the capital is locked in open positions with multiple TPs.
-            trade_capital = total_usdt_equity / denominator
+            trade_capital = total_usdt_equity / MAX_CONCURRENT_TRADES
 
             if leverage_to_set==1:
                 margin_to_use = trade_capital * 0.95
