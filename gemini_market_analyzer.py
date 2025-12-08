@@ -539,6 +539,10 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
             
             try:
                 # Use Groq API format
+                # Calculate max_tokens based on number of symbols (more symbols = more tokens needed)
+                # Base: 500 tokens per symbol, minimum 2000, maximum 8000
+                estimated_tokens = max(2000, min(8000, len(signals) * 2000))
+                
                 response = self.client.chat.completions.create(
                     model=current_model,
                     messages=[
@@ -546,7 +550,7 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         {"role": "user", "content": combined_prompt}
                     ],
                     temperature=0.3,
-                    max_tokens=4000
+                    max_tokens=estimated_tokens
                 )
                 self._increment_request_count(current_model)
                 response_text = response.choices[0].message.content.strip()
