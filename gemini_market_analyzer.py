@@ -1,6 +1,6 @@
 """
-Gemini AI Market Consolidation Detector
-This module integrates with Google's Gemini AI to analyze market conditions
+Market Consolidation Detector
+This module integrates with Groq (GPT-OSS-120B) to analyze market conditions
 and determine if the market is consolidating or trending.
 """
 
@@ -12,11 +12,13 @@ import numpy as np
 import time
 from typing import Dict, Tuple, Optional, List
 from datetime import date
-import google.generativeai as genai
 try:
-    from google.api_core import exceptions as google_exceptions
+    from groq import Groq
+    GROQ_AVAILABLE = True
 except ImportError:
-    google_exceptions = None
+    GROQ_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("groq package not found. Please install it: pip install groq")
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,34 +26,36 @@ load_dotenv()
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Daily request limit (free tier: 50 per model per day)
-DAILY_REQUEST_LIMIT = 200
+# Daily request limit (Groq has generous limits, but keeping tracking for safety)
+DAILY_REQUEST_LIMIT = 10000
 
-# Available models in order of preference (Flash models are faster/cheaper)
-# Free tier: 50 requests per day per model
+# Available Groq models in order of preference
+# Primary: GPT-OSS-120B (if available), fallback to other high-performance models
 AVAILABLE_MODELS = [
-    'gemini-2.5-flash',
-    'gemini-2.5-pro', # Fastest, cheapest
-    'gemini-2.0-flash-lite',  # Experimental flash
-    'gemini-2.5-flash-lite',        # More capable
-    'gemini-2.0-flash',      # Latest flash
-           # Latest pro (most expensive)
+    'gpt-oss-120b',  # Primary model requested
+    'llama-3.1-70b-versatile',  # High-performance fallback
+    'llama-3.1-8b-instant',  # Fast fallback
+    'mixtral-8x7b-32768',  # Alternative high-performance model
 ]
 
 class GeminiMarketAnalyzer:
     """
-    Uses Google's Gemini AI to analyze market data and determine consolidation status.
+    Uses Groq (GPT-OSS-120B) to analyze market data and determine consolidation status.
+    Kept class name for backward compatibility with existing code.
     """
     
     def __init__(self, api_key: Optional[str] = None, daily_limit: int = DAILY_REQUEST_LIMIT):
         """
-        Initialize the Gemini Market Analyzer.
+        Initialize the Market Analyzer using Groq.
         
         Args:
-            api_key: Google Gemini API key. If None, will try to load from environment.
-            daily_limit: Daily request limit per model (default: 50 for free tier)
+            api_key: Groq API key. If None, will try to load from environment.
+            daily_limit: Daily request limit per model (default: 10000 for Groq)
         """
-        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        if not GROQ_AVAILABLE:
+            raise ImportError("groq package is required. Install it with: pip install groq")
+        
+        self.api_key = api_key or os.getenv('GROQ_API_KEY')
         self.daily_limit = daily_limit
         self.request_count = 0
         self.last_reset_date = date.today()
@@ -63,34 +67,47 @@ class GeminiMarketAnalyzer:
         self.model_request_counts: Dict[str, int] = {}
         
         if not self.api_key:
-            logger.warning("GEMINI_API_KEY not found in environment variables.")
+            logger.warning("GROQ_API_KEY not found in environment variables.")
             logger.warning("Set it in your .env file or pass it during initialization.")
             self.client = None
             self.current_model = None
         else:
-            genai.configure(api_key=self.api_key)
-            self._initialize_model()
+            try:
+                self.client = Groq(api_key=self.api_key)
+                self._initialize_model()
+            except Exception as e:
+                logger.error(f"Failed to initialize Groq client: {e}")
+                self.client = None
+                self.current_model = None
         
-        logger.info(f"Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
+        logger.info(f"Groq Market Analyzer initialized. Model: {self.current_model}. Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
     
     def _initialize_model(self):
         """Initialize the first available model."""
+        if self.client is None:
+            return
+        
         self._reset_exhausted_models()
         for idx, model_name in enumerate(AVAILABLE_MODELS):
             try:
-                self.client = genai.GenerativeModel(model_name)
+                # Test the model by making a simple request
+                test_response = self.client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1
+                )
+                # If successful, set as current model
                 self.current_model = model_name
                 self.current_model_index = idx
                 if model_name not in self.model_request_counts:
                     self.model_request_counts[model_name] = 0
-                logger.info(f"Gemini AI initialized successfully with {model_name}")
+                logger.info(f"Groq model initialized successfully: {model_name}")
                 return
             except Exception as e:
                 logger.warning(f"Failed to initialize {model_name}: {e}")
                 continue
         
-        logger.error("Failed to initialize any Gemini model")
-        self.client = None
+        logger.error("Failed to initialize any Groq model")
         self.current_model = None
     
     def _reset_exhausted_models(self):
@@ -109,6 +126,9 @@ class GeminiMarketAnalyzer:
     
     def _switch_to_next_model(self) -> bool:
         """Switch to the next available model. Returns True if successful."""
+        if self.client is None:
+            return False
+        
         self._reset_exhausted_models()
         
         # Try next models in order
@@ -120,7 +140,12 @@ class GeminiMarketAnalyzer:
                 continue
             
             try:
-                self.client = genai.GenerativeModel(model_name)
+                # Test the model
+                test_response = self.client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1
+                )
                 self.current_model = model_name
                 self.current_model_index = idx
                 if model_name not in self.model_request_counts:
@@ -140,12 +165,14 @@ class GeminiMarketAnalyzer:
         if '429' in error_str or 'quota' in error_str.lower() or 'rate limit' in error_str.lower():
             return True
         
-        # Check for Google API rate limit exceptions
+        # Check for HTTP status code
         if hasattr(error, 'status_code') and error.status_code == 429:
             return True
         
-        if google_exceptions and isinstance(error, google_exceptions.ResourceExhausted):
-            return True
+        # Check for Groq API rate limit exceptions
+        if hasattr(error, 'response') and hasattr(error.response, 'status_code'):
+            if error.response.status_code == 429:
+                return True
         
         return False
     
@@ -203,9 +230,42 @@ class GeminiMarketAnalyzer:
             remaining = self.get_remaining_requests()
             logger.info(f"API Request #{self.request_count}/{self.daily_limit} used. {remaining} requests remaining today")
     
+    def analyze_multi_timeframe_consolidation(self,
+                                             df_ltf: pd.DataFrame,
+                                             df_htf: pd.DataFrame,
+                                             symbol: str,
+                                             trade_side: str) -> Tuple[bool, str]:
+        """
+        Analyze consolidation across multiple timeframes for a single symbol.
+        
+        Args:
+            df_ltf: Lower timeframe DataFrame (15m)
+            df_htf: Higher timeframe DataFrame (1H)
+            symbol: Trading symbol
+            trade_side: 'BUY' or 'SELL'
+            
+        Returns:
+            Tuple of (is_consolidating: bool, reasoning: str)
+        """
+        # Use batch analysis with single signal
+        signals = [{
+            'symbol': symbol,
+            'trade_side': trade_side,
+            'df_ltf': df_ltf,
+            'df_htf': df_htf
+        }]
+        
+        results = self.analyze_batch_multi_timeframe_consolidation(signals)
+        
+        if symbol in results:
+            is_unsafe, reasoning = results[symbol]
+            return is_unsafe, reasoning
+        else:
+            return True, "Analysis failed - no result returned"
+    
     def _prepare_market_summary(self, df: pd.DataFrame, symbol: str) -> str:
         """
-        Prepare a human-readable summary of market data for Gemini analysis.
+        Prepare a human-readable summary of market data for AI analysis.
         
         Args:
             df: DataFrame with OHLCV data and technical indicators
@@ -335,54 +395,43 @@ Recent Price Action (Last 5 candles):
         
         return summary
     
-    def is_market_consolidating(self, df: pd.DataFrame, symbol: str) -> bool:
+    def analyze_batch_multi_timeframe_consolidation(self,
+                                                   signals: List[Dict],
+                                                   max_retries: int = 3) -> Dict[str, Tuple[bool, str]]:
         """
-        Simplified interface to check if market is consolidating.
+        Analyze consolidation for multiple symbols in a SINGLE API call.
+        This is much more efficient than calling analyze_multi_timeframe_consolidation multiple times.
         
         Args:
-            df: DataFrame with market data
-            symbol: Trading symbol
-            
-        Returns:
-            bool: True if market is consolidating, False otherwise
-        """
-        is_consolidating, _ = self.analyze_consolidation(df, symbol)
-        return is_consolidating
-
-    def analyze_multi_timeframe_consolidation(self, 
-                                             df_ltf: pd.DataFrame, 
-                                             df_htf: pd.DataFrame, 
-                                             symbol: str, 
-                                             trade_side: str,
-                                             max_retries: int = 3) -> Tuple[bool, str]:
-        """
-        Analyze consolidation across both Lower Timeframe (LTF) and Higher Timeframe (HTF) in a SINGLE request.
-        Also checks if the trade direction is safe given the HTF trend.
-        
-        Args:
-            df_ltf: Lower timeframe DataFrame (e.g., 15m)
-            df_htf: Higher timeframe DataFrame (e.g., 1H)
-            symbol: Trading symbol
-            trade_side: 'BUY' or 'SELL'
+            signals: List of signal dicts, each containing:
+                - 'symbol': Trading symbol
+                - 'trade_side': 'BUY' or 'SELL'
+                - 'df_ltf': Lower timeframe DataFrame
+                - 'df_htf': Higher timeframe DataFrame
             max_retries: Max retry attempts
             
         Returns:
-            Tuple of (is_unsafe: bool, reasoning: str)
-            Returns True (unsafe/consolidating) if:
-                - Market is consolidating/choppy
-                - Trade direction contradicts strong HTF trend
-            Returns False (safe/trending) if the market is suitable for the proposed trade.
+            Dict mapping symbol to (is_unsafe: bool, reasoning: str)
         """
         if self.client is None:
-            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
-            return False, "Gemini client not initialized. Check API key."
+            logger.error("Groq client not initialized. Cannot analyze consolidation.")
+            return {s['symbol']: (True, "Groq client not initialized") for s in signals}
         
-        # Prepare market summaries
-        ltf_summary = self._prepare_market_summary(df_ltf, symbol)
-        htf_summary = self._prepare_market_summary(df_htf, symbol)
+        if not signals:
+            return {}
         
-        prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes to determine if a {trade_side} trade is safe.
-
+        # Prepare batch prompt with all symbols
+        batch_prompts = []
+        for signal in signals:
+            symbol = signal['symbol']
+            trade_side = signal['trade_side']
+            df_ltf = signal['df_ltf']
+            df_htf = signal['df_htf']
+            
+            ltf_summary = self._prepare_market_summary(df_ltf, symbol)
+            htf_summary = self._prepare_market_summary(df_htf, symbol)
+            
+            batch_prompts.append(f"""
 SYMBOL: {symbol}
 PROPOSED TRADE: {trade_side}
 
@@ -391,46 +440,57 @@ DATA 1: LOWER TIMEFRAME (15m) - Entry Timing
 
 DATA 2: HIGHER TIMEFRAME (1H) - Trend Direction
 {htf_summary}
+""")
+        
+        combined_prompt = f"""You are an expert crypto market analyst. Analyze the market structure across TWO timeframes for MULTIPLE symbols to determine if each trade is safe.
+
+Analyze {len(signals)} symbols in this batch:
+
+{''.join(batch_prompts)}
 
 Definitions:
 - CONSOLIDATION = range-bound, choppy, mixed structure, low momentum.
 - TRENDING = clear direction (uptrend/downtrend), consistent structure (HH/HL or LH/LL), strong momentum.
 
-Task:
-Synthesize both timeframes to decide if a {trade_side} trade is safe.
-1. CHECK ALIGNMENT: Is the 15m {trade_side} signal aligned with the 1H trend?
+For EACH symbol, synthesize both timeframes to decide if the proposed trade is safe:
+
+1. CHECK ALIGNMENT: Is the 15m signal aligned with the 1H trend?
    - If 1H is Uptrend and trade is SELL -> UNSAFE (Counter-trend).
    - If 1H is Downtrend and trade is BUY -> UNSAFE (Counter-trend).
+
 2. CHECK CONSOLIDATION:
    - If 1H is consolidating/choppy -> UNSAFE.
    - If 1H is trending strongly but 15m is consolidating (flag) -> WAIT for breakout (UNSAFE until clear).
    - If both are choppy -> UNSAFE.
+
 BUT IF THERE IS VERY STRONG TREND REVERSAL IN THE 15M TIMEFRAME, THEN IT IS SAFE TO TRADE.
-Note: Since the provided data uses closed candles, 1-hour aggregates may mask specific price action and volume spikes visible in 15-minute intervals (e.g., HH:15, HH:30, HH:45).
-what is trend reversal and it's characteristics?
+
+One thing to consider is the fact that the data provided is fully close candle so in 1 hour data you might not see the candles and the volume spike you see in the 15min data if the time is between hours like HH:15, HH:30, HH:45.
+
+What is trend reversal and its characteristics?
 - Trend reversal is a change in the direction of the trend.
+
 - A. Break of Market Structure (BMS)
-
     In an uptrend, price forms higher highs (HH) and higher lows (HL).
-    If price breaks below the last higher low, the structure flips → Downtrend begins.
--B. Momentum Shift (Candle Strength)
+    If price breaks below the last higher low, the structure flips -> Downtrend begins.
 
+- B. Momentum Shift (Candle Strength)
     Look for:
-
-    Large opposite-direction candles
-    Strong volume spike during opposite candles
-    Weak continuation candles during the old trend
+    - Large opposite-direction candles
+    - Strong volume spike during opposite candles
+    - Weak continuation candles during the old trend
 
 - C. Supply & Demand Zones
     Reversal probability is high if:
-    - Uptrend hits a strong supply zone → reversal down
-    - Downtrend hits a strong demand zone → reversal up
+    - Uptrend hits a strong supply zone -> reversal down
+    - Downtrend hits a strong demand zone -> reversal up
+
 - D. Volume Confirmation
     Reversal = volume shift:
     - Rising volume in the opposite direction
     - Falling volume in the previous direction
-    
-Sign of pullback:
+
+Signs of pullback (NOT reversal):
 - A. Pullback Has Weak Momentum
     - Signs:
         - Small candles
@@ -439,31 +499,34 @@ Sign of pullback:
         - Wicky candles
         - Reversal = strong opposite momentum
         - Pullback = weak opposite momentum
-B. Price Does NOT Break Structure
+
+- B. Price Does NOT Break Structure
     - In an uptrend:
         - Pullback will not break the previous HL
         - Instead, it forms a new HL before continuing up
     - In a downtrend:
         - Pullback stays below previous LH
-        - If structure is not broken → pullback, not reversal.
+        - If structure is not broken -> pullback, not reversal.
 
 - E. Pullback Ends at a Trendline
+    If trendline is respected -> pullback
+    If trendline breaks -> early sign of reversal
 
-If trendline is respected → pullback
-If trendline breaks → early sign of reversal
-Respond ONLY in this JSON format:
+For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the response:
 {{
-  "is_unsafe": true/false,
-  "confidence": 0.0-1.0,
-  "reasoning": "Concise explanation. Mention trend alignment (e.g., '1H Uptrend supports BUY' or '1H Downtrend contradicts BUY').",
-  "key_factors": ["factor1", "factor2"]
+  "{signals[0]['symbol']}": {{
+    "is_unsafe": true/false,
+    "confidence": 0.0-1.0,
+    "reasoning": "Concise explanation. Mention trend alignment (e.g., '1H Uptrend supports BUY' or '1H Downtrend contradicts BUY').",
+    "key_factors": ["factor1", "factor2"]
+  }}{','.join([f',\n  "{s["symbol"]}": {{\n    "is_unsafe": true/false,\n    "confidence": 0.0-1.0,\n    "reasoning": "Concise explanation. Mention trend alignment (e.g., \'1H Uptrend supports BUY\' or \'1H Downtrend contradicts BUY\').",\n    "key_factors": ["factor1", "factor2"]\n  }}' for s in signals[1:]])}
 }}
 """
         
-        # Retry logic with model switching (same as single analysis)
+        # Retry logic with model switching
         for attempt in range(max_retries + 1):
             if self.client is None:
-                return True, "No available models."
+                return {s['symbol']: (True, "No available models") for s in signals}
             
             current_model = self.current_model
             model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
@@ -471,13 +534,22 @@ Respond ONLY in this JSON format:
             if current_model and model_count >= self.daily_limit:
                 logger.warning(f"Model {current_model} has reached daily limit. Switching...")
                 if not self._switch_to_next_model():
-                    return True, "All models have reached daily quota limits."
+                    return {s['symbol']: (True, "All models exhausted") for s in signals}
                 continue
             
             try:
-                response = self.client.generate_content(prompt)
+                # Use Groq API format
+                response = self.client.chat.completions.create(
+                    model=current_model,
+                    messages=[
+                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses."},
+                        {"role": "user", "content": combined_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=4000
+                )
                 self._increment_request_count(current_model)
-                response_text = response.text.strip()
+                response_text = response.choices[0].message.content.strip()
                 
                 # Extract JSON
                 json_str = response_text
@@ -488,164 +560,34 @@ Respond ONLY in this JSON format:
                 json_str = json_str.strip()
                 
                 result = json.loads(json_str)
-                # The bot expects "is_consolidating" = True to BLOCK trade.
-                # So we map "is_unsafe" to that.
-                is_unsafe = bool(result.get('is_unsafe', True))
-                reasoning = result.get('reasoning', 'No reasoning provided')
-                confidence = result.get('confidence', 0.5)
                 
-                logger.info(f"Multi-TF Analysis for {symbol} {trade_side} ({current_model}): Unsafe={is_unsafe}, Confidence={confidence:.2f}")
-                return is_unsafe, reasoning
+                # Parse results for each symbol
+                results = {}
+                for signal in signals:
+                    symbol = signal['symbol']
+                    if symbol in result:
+                        symbol_result = result[symbol]
+                        is_unsafe = bool(symbol_result.get('is_unsafe', True))
+                        reasoning = symbol_result.get('reasoning', 'No reasoning provided')
+                        results[symbol] = (is_unsafe, reasoning)
+                    else:
+                        # Fallback if symbol not in response
+                        results[symbol] = (True, "Symbol not found in batch response")
                 
-            except Exception as e:
-                if self._is_rate_limit_error(e):
-                    logger.warning(f"Rate limit error for {current_model}: {e}")
-                    if current_model: self.exhausted_models[current_model] = date.today()
-                    if attempt < max_retries:
-                         if self._switch_to_next_model(): continue
-                    return True, f"Rate limit exceeded: {e}"
-                else:
-                    logger.error(f"Error in Multi-TF analysis: {e}")
-                    return True, f"Error in analysis: {str(e)}"
-        
-        return True, "Failed after all retry attempts"
-
-    def analyze_consolidation(self, df: pd.DataFrame, symbol: str, 
-                             context: Optional[str] = None, max_retries: int = 3) -> Tuple[bool, str]:
-        """
-        Use Gemini AI to determine if the market is consolidating.
-        
-        Args:
-            df: DataFrame with market data and indicators
-            symbol: Trading symbol
-            context: Additional context or constraints
-            max_retries: Maximum number of retries with different models
-            
-        Returns:
-            Tuple of (is_consolidating: bool, reasoning: str)
-        """
-        if self.client is None:
-            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
-            return False, "Gemini client not initialized. Check API key."
-        
-        # Prepare market summary once
-        market_summary = self._prepare_market_summary(df, symbol)
-        
-        prompt = f"""You are an expert crypto market analyst. Determine if the market is in CONSOLIDATION or TRENDING.
-
-Evaluate: NEWS/EVENTS, CORRELATION (BTC/ETH leadership), MARKET STRUCTURE (support/resistance, volume), SENTIMENT.
-
-Definitions:
-- CONSOLIDATION = range-bound, low conviction, mixed structure, sideways relative to typical volatility.
-- TRENDING = clear direction, strong conviction, consistent HH/HL (uptrend) or LH/LL (downtrend), breakouts with momentum.
-
-Rules:
-- Use staircase structure to identify trend.
-- Ignore small counter-trend candles unless they break prior swing structure.
-- Call consolidation only if structure is mixed AND momentum is weak AND price stays within a range.
-- Consider news, correlations, and macro context when technicals conflict.
-
-Input Data:
-{market_summary}
-
-Additional Context:
-{context or 'None'}
-
-Respond ONLY in this JSON format:
-{{
-  "is_consolidating": true/false,
-  "confidence": 0.0-1.0,
-  "reasoning": "brief explanation referencing news, correlations, structure",
-  "key_factors": ["factor1", "factor2", ...]
-}}
-"""
-        
-        # Retry logic with model switching
-        for attempt in range(max_retries + 1):
-            if self.client is None:
-                logger.error("No available models. Cannot analyze consolidation.")
-                return True, "No available models. All models exhausted."
-            
-            current_model = self.current_model
-            model_count = self.model_request_counts.get(current_model, 0) if current_model else 0
-            
-            if current_model and model_count >= self.daily_limit:
-                logger.warning(f"Model {current_model} has reached daily limit. Switching...")
-                if not self._switch_to_next_model():
-                    return True, "All models have reached daily quota limits."
-                continue
-            
-            try:
-                # Query Gemini
-                response = self.client.generate_content(prompt)
-                self._increment_request_count(current_model)
-                response_text = response.text.strip()
-                
-                # Extract JSON from response
-                json_str = response_text
-                if '```json' in json_str:
-                    json_str = json_str.split('```json')[1].split('```')[0]
-                elif '```' in json_str:
-                    json_str = json_str.split('```')[1]
-                
-                json_str = json_str.strip()
-                
-                # Parse response
-                result = json.loads(json_str)
-                
-                is_consolidating = bool(result.get('is_consolidating', True))
-                reasoning = result.get('reasoning', 'No reasoning provided')
-                key_factors = result.get('key_factors', [])
-                confidence = result.get('confidence', 0.5)
-                
-                logger.info(f"Gemini analysis for {symbol} ({current_model}): Consolidating={is_consolidating}, Confidence={confidence:.2f}, Key Factors={key_factors}")
-                
-                return is_consolidating, reasoning
+                logger.info(f"Batch Multi-TF Analysis ({current_model}): Processed {len(signals)} symbols")
+                return results
                 
             except Exception as e:
                 if self._is_rate_limit_error(e):
                     logger.warning(f"Rate limit error for {current_model}: {e}")
-                    
-                    # Mark current model as exhausted
                     if current_model:
                         self.exhausted_models[current_model] = date.today()
-                        logger.warning(f"Marked {current_model} as exhausted due to rate limit")
-                    
-                    # Try to switch to next model
                     if attempt < max_retries:
-                        retry_delay = self._extract_retry_delay(e)
-                        logger.info(f"Waiting {retry_delay:.1f}s before switching models...")
-                        time.sleep(min(retry_delay, 10.0))  # Cap delay at 10 seconds
-                        
                         if self._switch_to_next_model():
-                            logger.info(f"Switched to {self.current_model} for retry attempt {attempt + 1}")
                             continue
-                        else:
-                            logger.error("No more models available after rate limit error")
-                            return True, f"Rate limit exceeded. All models exhausted: {str(e)}"
-                    else:
-                        logger.error(f"Max retries reached. Rate limit error: {e}")
-                        return True, f"Rate limit exceeded after {max_retries} retries: {str(e)}"
+                    return {s['symbol']: (True, f"Rate limit exceeded: {e}") for s in signals}
                 else:
-                    # Non-rate-limit error
-                    logger.error(f"Error in Gemini analysis for {symbol}: {e}", exc_info=True)
-                    return True, f"Error in analysis: {str(e)}"
+                    logger.error(f"Error in Batch Multi-TF analysis: {e}")
+                    return {s['symbol']: (True, f"Error in analysis: {str(e)}") for s in signals}
         
-        return True, "Failed after all retry attempts"
-
-
-def check_market_consolidation(df: pd.DataFrame, symbol: str, 
-                               api_key: Optional[str] = None) -> bool:
-    """
-    Convenience function to check if a market is consolidating using Gemini AI.
-    
-    Args:
-        df: DataFrame with market data and indicators
-        symbol: Trading symbol
-        api_key: Optional Gemini API key (if None, uses default)
-        
-    Returns:
-        bool: True if market is consolidating
-    """
-    analyzer = GeminiMarketAnalyzer(api_key=api_key)
-    return analyzer.is_market_consolidating(df, symbol)
+        return {s['symbol']: (True, "Failed after all retry attempts") for s in signals}
