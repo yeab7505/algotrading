@@ -32,7 +32,7 @@ DAILY_REQUEST_LIMIT = 10000
 # Available Groq models in order of preference
 # Primary: GPT-OSS-120B (if available), fallback to other high-performance models
 AVAILABLE_MODELS = [
-    'gpt-oss-120b',  # Primary model requested
+    'openai/gpt-oss-120b',  # Primary model requested
     'llama-3.1-70b-versatile',  # High-performance fallback
     'llama-3.1-8b-instant',  # Fast fallback
     'mixtral-8x7b-32768',  # Alternative high-performance model
