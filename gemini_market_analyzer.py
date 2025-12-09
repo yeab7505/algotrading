@@ -1,6 +1,6 @@
 """
-Market Consolidation Detector
-This module integrates with Groq (GPT-OSS-120B) to analyze market conditions
+Gemini AI Market Consolidation Detector
+This module integrates with Google's Gemini AI to analyze market conditions
 and determine if the market is consolidating or trending.
 """
 
@@ -12,13 +12,11 @@ import numpy as np
 import time
 from typing import Dict, Tuple, Optional, List
 from datetime import date
+import google.generativeai as genai
 try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
+    from google.api_core import exceptions as google_exceptions
 except ImportError:
-    GROQ_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("groq package not found. Please install it: pip install groq")
+    google_exceptions = None
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,36 +24,35 @@ load_dotenv()
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Daily request limit (Groq has generous limits, but keeping tracking for safety)
-DAILY_REQUEST_LIMIT = 10000
+# Daily request limit (free tier: 50 per model per day)
+DAILY_REQUEST_LIMIT = 200
 
-# Available Groq models in order of preference
-# Primary: GPT-OSS-120B (if available), fallback to other high-performance models
+# Available models in order of preference (Flash models are faster/cheaper)
+# Free tier: 50 requests per day per model
 AVAILABLE_MODELS = [
-    'openai/gpt-oss-120b',  # Primary model requested
-    'llama-3.1-70b-versatile',  # High-performance fallback
-    'llama-3.1-8b-instant',  # Fast fallback
-    'mixtral-8x7b-32768',  # Alternative high-performance model
+    'gemini-2.5-flash-live',  # Live model - optimized for real-time analysis
+    'gemini-2.5-flash',
+    'gemini-2.5-pro', # Fastest, cheapest
+    'gemini-2.0-flash-lite',  # Experimental flash
+    'gemini-2.5-flash-lite',        # More capable
+    'gemini-2.0-flash',      # Latest flash
+           # Latest pro (most expensive)
 ]
 
 class GeminiMarketAnalyzer:
     """
-    Uses Groq (GPT-OSS-120B) to analyze market data and determine consolidation status.
-    Kept class name for backward compatibility with existing code.
+    Uses Google's Gemini AI to analyze market data and determine consolidation status.
     """
     
     def __init__(self, api_key: Optional[str] = None, daily_limit: int = DAILY_REQUEST_LIMIT):
         """
-        Initialize the Market Analyzer using Groq.
+        Initialize the Gemini Market Analyzer.
         
         Args:
-            api_key: Groq API key. If None, will try to load from environment.
-            daily_limit: Daily request limit per model (default: 10000 for Groq)
+            api_key: Google Gemini API key. If None, will try to load from environment.
+            daily_limit: Daily request limit per model (default: 50 for free tier)
         """
-        if not GROQ_AVAILABLE:
-            raise ImportError("groq package is required. Install it with: pip install groq")
-        
-        self.api_key = api_key or os.getenv('GROQ_API_KEY')
+        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
         self.daily_limit = daily_limit
         self.request_count = 0
         self.last_reset_date = date.today()
@@ -67,47 +64,34 @@ class GeminiMarketAnalyzer:
         self.model_request_counts: Dict[str, int] = {}
         
         if not self.api_key:
-            logger.warning("GROQ_API_KEY not found in environment variables.")
+            logger.warning("GEMINI_API_KEY not found in environment variables.")
             logger.warning("Set it in your .env file or pass it during initialization.")
             self.client = None
             self.current_model = None
         else:
-            try:
-                self.client = Groq(api_key=self.api_key)
-                self._initialize_model()
-            except Exception as e:
-                logger.error(f"Failed to initialize Groq client: {e}")
-                self.client = None
-                self.current_model = None
+            genai.configure(api_key=self.api_key)
+            self._initialize_model()
         
-        logger.info(f"Groq Market Analyzer initialized. Model: {self.current_model}. Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
+        logger.info(f"Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
     
     def _initialize_model(self):
         """Initialize the first available model."""
-        if self.client is None:
-            return
-        
         self._reset_exhausted_models()
         for idx, model_name in enumerate(AVAILABLE_MODELS):
             try:
-                # Test the model by making a simple request
-                test_response = self.client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": "test"}],
-                    max_tokens=1
-                )
-                # If successful, set as current model
+                self.client = genai.GenerativeModel(model_name)
                 self.current_model = model_name
                 self.current_model_index = idx
                 if model_name not in self.model_request_counts:
                     self.model_request_counts[model_name] = 0
-                logger.info(f"Groq model initialized successfully: {model_name}")
+                logger.info(f"Gemini AI initialized successfully with {model_name}")
                 return
             except Exception as e:
                 logger.warning(f"Failed to initialize {model_name}: {e}")
                 continue
         
-        logger.error("Failed to initialize any Groq model")
+        logger.error("Failed to initialize any Gemini model")
+        self.client = None
         self.current_model = None
     
     def _reset_exhausted_models(self):
@@ -126,9 +110,6 @@ class GeminiMarketAnalyzer:
     
     def _switch_to_next_model(self) -> bool:
         """Switch to the next available model. Returns True if successful."""
-        if self.client is None:
-            return False
-        
         self._reset_exhausted_models()
         
         # Try next models in order
@@ -140,12 +121,7 @@ class GeminiMarketAnalyzer:
                 continue
             
             try:
-                # Test the model
-                test_response = self.client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": "test"}],
-                    max_tokens=1
-                )
+                self.client = genai.GenerativeModel(model_name)
                 self.current_model = model_name
                 self.current_model_index = idx
                 if model_name not in self.model_request_counts:
@@ -165,14 +141,12 @@ class GeminiMarketAnalyzer:
         if '429' in error_str or 'quota' in error_str.lower() or 'rate limit' in error_str.lower():
             return True
         
-        # Check for HTTP status code
+        # Check for Google API rate limit exceptions
         if hasattr(error, 'status_code') and error.status_code == 429:
             return True
         
-        # Check for Groq API rate limit exceptions
-        if hasattr(error, 'response') and hasattr(error.response, 'status_code'):
-            if error.response.status_code == 429:
-                return True
+        if google_exceptions and isinstance(error, google_exceptions.ResourceExhausted):
+            return True
         
         return False
     
@@ -230,42 +204,9 @@ class GeminiMarketAnalyzer:
             remaining = self.get_remaining_requests()
             logger.info(f"API Request #{self.request_count}/{self.daily_limit} used. {remaining} requests remaining today")
     
-    def analyze_multi_timeframe_consolidation(self,
-                                             df_ltf: pd.DataFrame,
-                                             df_htf: pd.DataFrame,
-                                             symbol: str,
-                                             trade_side: str) -> Tuple[bool, str]:
-        """
-        Analyze consolidation across multiple timeframes for a single symbol.
-        
-        Args:
-            df_ltf: Lower timeframe DataFrame (15m)
-            df_htf: Higher timeframe DataFrame (1H)
-            symbol: Trading symbol
-            trade_side: 'BUY' or 'SELL'
-            
-        Returns:
-            Tuple of (is_consolidating: bool, reasoning: str)
-        """
-        # Use batch analysis with single signal
-        signals = [{
-            'symbol': symbol,
-            'trade_side': trade_side,
-            'df_ltf': df_ltf,
-            'df_htf': df_htf
-        }]
-        
-        results = self.analyze_batch_multi_timeframe_consolidation(signals)
-        
-        if symbol in results:
-            is_unsafe, reasoning = results[symbol]
-            return is_unsafe, reasoning
-        else:
-            return True, "Analysis failed - no result returned"
-    
     def _prepare_market_summary(self, df: pd.DataFrame, symbol: str) -> str:
         """
-        Prepare a human-readable summary of market data for AI analysis.
+        Prepare a human-readable summary of market data for Gemini analysis.
         
         Args:
             df: DataFrame with OHLCV data and technical indicators
@@ -414,8 +355,8 @@ Recent Price Action (Last 5 candles):
             Dict mapping symbol to (is_unsafe: bool, reasoning: str)
         """
         if self.client is None:
-            logger.error("Groq client not initialized. Cannot analyze consolidation.")
-            return {s['symbol']: (True, "Groq client not initialized") for s in signals}
+            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
+            return {s['symbol']: (True, "Gemini client not initialized") for s in signals}
         
         if not signals:
             return {}
@@ -512,8 +453,6 @@ Signs of pullback (NOT reversal):
     If trendline is respected -> pullback
     If trendline breaks -> early sign of reversal
 
-MAKE SURE TO ANALYSE THE MARKET DEEPLY WHEN YOU DETECT CANDLES WITH HUGE WICKS. THEY MIGHT BE A SIGN OF INDECISION OR REJECTION WAIT FOR THE NEXT CANDLES TO DECIDE.
-
 For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the response:
 {{
   "{signals[0]['symbol']}": {{
@@ -540,22 +479,9 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 continue
             
             try:
-                # Use Groq API format
-                # Calculate max_tokens based on number of symbols (more symbols = more tokens needed)
-                # Base: 500 tokens per symbol, minimum 2000, maximum 8000
-                estimated_tokens = max(2000, min(8000, len(signals) * 2000))
-                
-                response = self.client.chat.completions.create(
-                    model=current_model,
-                    messages=[
-                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses."},
-                        {"role": "user", "content": combined_prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=estimated_tokens
-                )
+                response = self.client.generate_content(combined_prompt)
                 self._increment_request_count(current_model)
-                response_text = response.choices[0].message.content.strip()
+                response_text = response.text.strip()
                 
                 # Extract JSON
                 json_str = response_text
