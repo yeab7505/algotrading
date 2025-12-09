@@ -1688,10 +1688,17 @@ class ForwardIchimokuTrader:
                 self.logger.error(f"FAILED TO PLACE SL ORDER. Error: {e}", exc_info=True)
 
             # Place 3 TP orders using the split quantities
+            # Use limit take-profit orders to avoid algo-only restrictions (-4120)
             try:
                 tp1_params = {
-                    'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
-                    'quantity': tp_qty_1, 'stopPrice': self.tp_level_1, 'reduceOnly': True
+                    'symbol': self.symbol,
+                    'side': tp_side,
+                    'type': 'TAKE_PROFIT',
+                    'quantity': tp_qty_1,
+                    'price': self.tp_level_1,
+                    'stopPrice': self.tp_level_1,
+                    'timeInForce': 'GTC',
+                    'reduceOnly': True
                 }
                 tp1_order = self.client.futures_create_order(**tp1_params)
                 self.tp_orderid_1 = tp1_order['orderId']
@@ -1702,8 +1709,14 @@ class ForwardIchimokuTrader:
 
             try:
                 tp2_params = {
-                    'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
-                    'quantity': tp_qty_2, 'stopPrice': self.tp_level_2, 'reduceOnly': True
+                    'symbol': self.symbol,
+                    'side': tp_side,
+                    'type': 'TAKE_PROFIT',
+                    'quantity': tp_qty_2,
+                    'price': self.tp_level_2,
+                    'stopPrice': self.tp_level_2,
+                    'timeInForce': 'GTC',
+                    'reduceOnly': True
                 }
                 tp2_order = self.client.futures_create_order(**tp2_params)
                 self.tp_orderid_2 = tp2_order['orderId']
@@ -1713,8 +1726,14 @@ class ForwardIchimokuTrader:
 
             try:
                 tp3_params = {
-                    'symbol': self.symbol, 'side': tp_side, 'type': 'TAKE_PROFIT_MARKET',
-                    'quantity': tp_qty_3, 'stopPrice': self.tp_level_3, 'reduceOnly': True
+                    'symbol': self.symbol,
+                    'side': tp_side,
+                    'type': 'TAKE_PROFIT',
+                    'quantity': tp_qty_3,
+                    'price': self.tp_level_3,
+                    'stopPrice': self.tp_level_3,
+                    'timeInForce': 'GTC',
+                    'reduceOnly': True
                 }
                 tp3_order = self.client.futures_create_order(**tp3_params)
                 self.tp_orderid_3 = tp3_order['orderId']
