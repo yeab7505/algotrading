@@ -1,6 +1,6 @@
 """
-Gemini AI Market Consolidation Detector
-This module integrates with Google's Gemini AI to analyze market conditions
+AI Market Consolidation Detector
+This module integrates with OpenRouter's Tongyi 30B model to analyze market conditions
 and determine if the market is consolidating or trending.
 """
 
@@ -10,13 +10,9 @@ import json
 import pandas as pd
 import numpy as np
 import time
+import requests
 from typing import Dict, Tuple, Optional, List
 from datetime import date
-import google.generativeai as genai
-try:
-    from google.api_core import exceptions as google_exceptions
-except ImportError:
-    google_exceptions = None
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,35 +20,33 @@ load_dotenv()
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Daily request limit (free tier: 50 per model per day)
-DAILY_REQUEST_LIMIT = 200
+# Daily request limit (OpenRouter has generous limits)
+DAILY_REQUEST_LIMIT = 10000
 
-# Available models in order of preference (Flash models are faster/cheaper)
-# Free tier: 50 requests per day per model
+# OpenRouter API endpoint
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Available models in order of preference
 AVAILABLE_MODELS = [
-    'gemini-2.5-flash-live',  # Live model - optimized for real-time analysis
-    'gemini-2.5-flash',
-    'gemini-2.5-pro', # Fastest, cheapest
-    'gemini-2.0-flash-lite',  # Experimental flash
-    'gemini-2.5-flash-lite',        # More capable
-    'gemini-2.0-flash',      # Latest flash
-           # Latest pro (most expensive)
+    'alibaba/tongyi-deepresearch-30b-a3b',  # Tongyi 30B model
+    'alibaba/tongyi-pro',  # Fallback to Tongyi Pro if available
 ]
 
 class GeminiMarketAnalyzer:
     """
-    Uses Google's Gemini AI to analyze market data and determine consolidation status.
+    Uses OpenRouter's Tongyi 30B model to analyze market data and determine consolidation status.
+    Class name kept for backward compatibility with existing code.
     """
     
     def __init__(self, api_key: Optional[str] = None, daily_limit: int = DAILY_REQUEST_LIMIT):
         """
-        Initialize the Gemini Market Analyzer.
+        Initialize the Market Analyzer using OpenRouter.
         
         Args:
-            api_key: Google Gemini API key. If None, will try to load from environment.
-            daily_limit: Daily request limit per model (default: 50 for free tier)
+            api_key: OpenRouter API key. If None, will try to load from environment.
+            daily_limit: Daily request limit (default: 10000 for OpenRouter)
         """
-        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        self.api_key = api_key or os.getenv('OPENROUTER_API_KEY')
         self.daily_limit = daily_limit
         self.request_count = 0
         self.last_reset_date = date.today()
@@ -64,34 +58,37 @@ class GeminiMarketAnalyzer:
         self.model_request_counts: Dict[str, int] = {}
         
         if not self.api_key:
-            logger.warning("GEMINI_API_KEY not found in environment variables.")
+            logger.warning("OPENROUTER_API_KEY not found in environment variables.")
             logger.warning("Set it in your .env file or pass it during initialization.")
-            self.client = None
             self.current_model = None
         else:
-            genai.configure(api_key=self.api_key)
             self._initialize_model()
         
-        logger.info(f"Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
+        logger.info(f"OpenRouter Market Analyzer initialized. Model: {self.current_model}. Request tracking initialized: {self.get_remaining_requests()} requests remaining today")
     
     def _initialize_model(self):
         """Initialize the first available model."""
         self._reset_exhausted_models()
         for idx, model_name in enumerate(AVAILABLE_MODELS):
             try:
-                self.client = genai.GenerativeModel(model_name)
+                # Test the model with a simple request
+                test_response = self._make_api_request(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1
+                )
+                # If successful, set as current model
                 self.current_model = model_name
                 self.current_model_index = idx
                 if model_name not in self.model_request_counts:
                     self.model_request_counts[model_name] = 0
-                logger.info(f"Gemini AI initialized successfully with {model_name}")
+                logger.info(f"OpenRouter model initialized successfully: {model_name}")
                 return
             except Exception as e:
                 logger.warning(f"Failed to initialize {model_name}: {e}")
                 continue
         
-        logger.error("Failed to initialize any Gemini model")
-        self.client = None
+        logger.error("Failed to initialize any OpenRouter model")
         self.current_model = None
     
     def _reset_exhausted_models(self):
@@ -121,7 +118,12 @@ class GeminiMarketAnalyzer:
                 continue
             
             try:
-                self.client = genai.GenerativeModel(model_name)
+                # Test the model
+                test_response = self._make_api_request(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1
+                )
                 self.current_model = model_name
                 self.current_model_index = idx
                 if model_name not in self.model_request_counts:
@@ -135,18 +137,53 @@ class GeminiMarketAnalyzer:
         logger.error("No available models remaining")
         return False
     
+    def _make_api_request(self, model: str, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
+        """
+        Make an API request to OpenRouter.
+        
+        Args:
+            model: Model name
+            messages: List of message dicts with 'role' and 'content'
+            max_tokens: Maximum tokens in response
+            temperature: Temperature for generation
+            
+        Returns:
+            Response text
+        """
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com/your-repo',  # Optional
+            'X-Title': 'Trading Bot'  # Optional
+        }
+        
+        payload = {
+            'model': model,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': temperature
+        }
+        
+        response = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        
+        result = response.json()
+        return result['choices'][0]['message']['content']
+    
     def _is_rate_limit_error(self, error: Exception) -> bool:
         """Check if error is a rate limit (429) error."""
         error_str = str(error)
         if '429' in error_str or 'quota' in error_str.lower() or 'rate limit' in error_str.lower():
             return True
         
-        # Check for Google API rate limit exceptions
+        # Check for HTTP status code
         if hasattr(error, 'status_code') and error.status_code == 429:
             return True
         
-        if google_exceptions and isinstance(error, google_exceptions.ResourceExhausted):
-            return True
+        # Check for requests library exceptions
+        if isinstance(error, requests.exceptions.HTTPError):
+            if hasattr(error, 'response') and error.response.status_code == 429:
+                return True
         
         return False
     
@@ -206,7 +243,7 @@ class GeminiMarketAnalyzer:
     
     def _prepare_market_summary(self, df: pd.DataFrame, symbol: str) -> str:
         """
-        Prepare a human-readable summary of market data for Gemini analysis.
+        Prepare a human-readable summary of market data for AI analysis.
         
         Args:
             df: DataFrame with OHLCV data and technical indicators
@@ -384,9 +421,9 @@ Recent Price Action (Last 5 candles):
         Returns:
             Dict mapping symbol to (is_unsafe: bool, reasoning: str)
         """
-        if self.client is None:
-            logger.error("Gemini client not initialized. Cannot analyze consolidation.")
-            return {s['symbol']: (True, "Gemini client not initialized") for s in signals}
+        if not self.api_key or self.current_model is None:
+            logger.error("OpenRouter client not initialized. Cannot analyze consolidation.")
+            return {s['symbol']: (True, "OpenRouter client not initialized") for s in signals}
         
         if not signals:
             return {}
@@ -496,7 +533,7 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
         
         # Retry logic with model switching
         for attempt in range(max_retries + 1):
-            if self.client is None:
+            if self.current_model is None:
                 return {s['symbol']: (True, "No available models") for s in signals}
             
             current_model = self.current_model
@@ -509,9 +546,22 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 continue
             
             try:
-                response = self.client.generate_content(combined_prompt)
+                # Use OpenRouter API format
+                # Calculate max_tokens based on number of symbols (more symbols = more tokens needed)
+                # Base: 500 tokens per symbol, minimum 2000, maximum 8000
+                estimated_tokens = max(2000, min(8000, len(signals) * 500))
+                
+                response_text = self._make_api_request(
+                    model=current_model,
+                    messages=[
+                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses."},
+                        {"role": "user", "content": combined_prompt}
+                    ],
+                    max_tokens=estimated_tokens,
+                    temperature=0.3
+                )
                 self._increment_request_count(current_model)
-                response_text = response.text.strip()
+                response_text = response_text.strip()
                 
                 # Extract JSON
                 json_str = response_text
