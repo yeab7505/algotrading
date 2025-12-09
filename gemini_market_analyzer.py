@@ -72,10 +72,11 @@ class GeminiMarketAnalyzer:
         for idx, model_name in enumerate(AVAILABLE_MODELS):
             try:
                 # Test the model with a simple request
+                # Use sufficient max_tokens to avoid truncation (at least 50 tokens)
                 test_response = self._make_api_request(
                     model=model_name,
-                    messages=[{"role": "user", "content": "test"}],
-                    max_tokens=1
+                    messages=[{"role": "user", "content": "Say 'OK' if you can process requests."}],
+                    max_tokens=50
                 )
                 # If successful, set as current model
                 self.current_model = model_name
@@ -119,10 +120,11 @@ class GeminiMarketAnalyzer:
             
             try:
                 # Test the model
+                # Use sufficient max_tokens to avoid truncation (at least 50 tokens)
                 test_response = self._make_api_request(
                     model=model_name,
-                    messages=[{"role": "user", "content": "test"}],
-                    max_tokens=1
+                    messages=[{"role": "user", "content": "Say 'OK' if you can process requests."}],
+                    max_tokens=50
                 )
                 self.current_model = model_name
                 self.current_model_index = idx
@@ -137,7 +139,7 @@ class GeminiMarketAnalyzer:
         logger.error("No available models remaining")
         return False
     
-    def _make_api_request(self, model: str, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
+    def _make_api_request(self, model: str, messages: List[Dict], max_tokens: int = 8000, temperature: float = 0.3) -> str:
         """
         Make an API request to OpenRouter.
         
@@ -190,6 +192,9 @@ class GeminiMarketAnalyzer:
             message = choice.get('message', {})
             content = message.get('content', '')
             
+            # Check finish_reason to understand why content might be empty
+            finish_reason = choice.get('finish_reason', '')
+            
             # Alternative: check if content is in choice directly
             if not content and 'text' in choice:
                 content = choice['text']
@@ -200,10 +205,19 @@ class GeminiMarketAnalyzer:
                 content = delta.get('content', '')
             
             if not content:
-                logger.error(f"Empty content in OpenRouter response.")
-                logger.error(f"Response structure: choices={len(result.get('choices', []))}, first choice keys: {list(choice.keys()) if result.get('choices') else 'no choices'}")
-                logger.error(f"Full response (first 2000 chars): {str(result)[:2000]}")
-                raise Exception("Empty content in API response")
+                # Check if it's a length limit issue
+                if finish_reason == 'length':
+                    usage = result.get('usage', {})
+                    completion_tokens = usage.get('completion_tokens', 0)
+                    max_tokens_used = usage.get('total_tokens', 0)
+                    logger.warning(f"Response truncated due to max_tokens limit. finish_reason='length', completion_tokens={completion_tokens}")
+                    raise Exception(f"Response truncated: max_tokens ({max_tokens}) too low. Generated {completion_tokens} tokens before cutoff.")
+                else:
+                    logger.error(f"Empty content in OpenRouter response.")
+                    logger.error(f"finish_reason: {finish_reason}")
+                    logger.error(f"Response structure: choices={len(result.get('choices', []))}, first choice keys: {list(choice.keys()) if result.get('choices') else 'no choices'}")
+                    logger.error(f"Full response (first 2000 chars): {str(result)[:2000]}")
+                    raise Exception(f"Empty content in API response (finish_reason: {finish_reason})")
             
             return content
             
@@ -599,8 +613,9 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
             try:
                 # Use OpenRouter API format
                 # Calculate max_tokens based on number of symbols (more symbols = more tokens needed)
-                # Base: 500 tokens per symbol, minimum 2000, maximum 8000
-                estimated_tokens = max(2000, min(8000, len(signals) * 500))
+                # Base: 1000 tokens per symbol for JSON response, minimum 4000, maximum 16000
+                # Increased significantly to handle full JSON responses
+                estimated_tokens = max(4000, min(16000, len(signals) * 1000))
                 
                 response_text = self._make_api_request(
                     model=current_model,
@@ -687,7 +702,20 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 return results
                 
             except Exception as e:
-                if self._is_rate_limit_error(e):
+                error_str = str(e)
+                # Check if it's a max_tokens truncation issue
+                if 'truncated' in error_str.lower() or 'max_tokens' in error_str.lower() or 'finish_reason' in error_str.lower():
+                    logger.warning(f"Response truncated for {current_model}: {e}")
+                    # Retry with increased max_tokens if we haven't exhausted retries
+                    if attempt < max_retries:
+                        # Double the token limit for next attempt
+                        estimated_tokens = min(16000, estimated_tokens * 2)
+                        logger.info(f"Retrying with increased max_tokens: {estimated_tokens}")
+                        continue
+                    else:
+                        logger.error(f"Failed after retrying with increased tokens: {e}")
+                        return {s['symbol']: (True, f"Response truncated: {e}") for s in signals}
+                elif self._is_rate_limit_error(e):
                     logger.warning(f"Rate limit error for {current_model}: {e}")
                     if current_model:
                         self.exhausted_models[current_model] = date.today()
