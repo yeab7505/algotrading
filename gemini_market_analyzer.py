@@ -512,6 +512,8 @@ Signs of pullback (NOT reversal):
     If trendline is respected -> pullback
     If trendline breaks -> early sign of reversal
 
+MAKE SURE TO ANALYSE THE MARKET DEEPLY WHEN YOU DETECT CANDLES WITH HUGE WICKS. THEY MIGHT BE A SIGN OF INDECISION OR REJECTION WAIT FOR THE NEXT CANDLES TO DECIDE.
+
 For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the response:
 {{
   "{signals[0]['symbol']}": {{
