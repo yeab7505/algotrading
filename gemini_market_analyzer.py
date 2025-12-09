@@ -149,6 +149,9 @@ class GeminiMarketAnalyzer:
             
         Returns:
             Response text
+            
+        Raises:
+            Exception: If API request fails or response is invalid
         """
         headers = {
             'Authorization': f'Bearer {self.api_key}',
@@ -164,11 +167,59 @@ class GeminiMarketAnalyzer:
             'temperature': temperature
         }
         
-        response = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        
-        result = response.json()
-        return result['choices'][0]['message']['content']
+        try:
+            response = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            # Log full response for debugging (first time only)
+            if not hasattr(self, '_logged_response_format'):
+                logger.debug(f"OpenRouter API response structure: {list(result.keys())}")
+                self._logged_response_format = True
+            
+            # Validate response structure
+            if 'choices' not in result or len(result['choices']) == 0:
+                error_msg = result.get('error', {}).get('message', 'No choices in response')
+                error_data = result.get('error', {})
+                logger.error(f"OpenRouter API error: {error_msg}. Error data: {error_data}. Full response keys: {list(result.keys())}")
+                raise Exception(f"Invalid API response: {error_msg}")
+            
+            # Extract content - handle different possible response formats
+            choice = result['choices'][0]
+            message = choice.get('message', {})
+            content = message.get('content', '')
+            
+            # Alternative: check if content is in choice directly
+            if not content and 'text' in choice:
+                content = choice['text']
+            
+            # Alternative: check if content is in delta (streaming responses)
+            if not content and 'delta' in choice:
+                delta = choice.get('delta', {})
+                content = delta.get('content', '')
+            
+            if not content:
+                logger.error(f"Empty content in OpenRouter response.")
+                logger.error(f"Response structure: choices={len(result.get('choices', []))}, first choice keys: {list(choice.keys()) if result.get('choices') else 'no choices'}")
+                logger.error(f"Full response (first 2000 chars): {str(result)[:2000]}")
+                raise Exception("Empty content in API response")
+            
+            return content
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"OpenRouter API request failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json()
+                    logger.error(f"API error details: {error_detail}")
+                except:
+                    logger.error(f"API error response: {e.response.text}")
+            raise
+        except (KeyError, IndexError) as e:
+            logger.error(f"Unexpected response structure from OpenRouter: {e}")
+            logger.error(f"Response: {result if 'result' in locals() else 'No response'}")
+            raise Exception(f"Unexpected response format: {e}")
     
     def _is_rate_limit_error(self, error: Exception) -> bool:
         """Check if error is a rate limit (429) error."""
@@ -554,24 +605,70 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 response_text = self._make_api_request(
                     model=current_model,
                     messages=[
-                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses."},
+                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses. Always respond with valid JSON only, no markdown formatting."},
                         {"role": "user", "content": combined_prompt}
                     ],
                     max_tokens=estimated_tokens,
                     temperature=0.3
                 )
                 self._increment_request_count(current_model)
-                response_text = response_text.strip()
                 
-                # Extract JSON
+                if not response_text:
+                    logger.error("Received empty response from OpenRouter API")
+                    raise ValueError("Empty response from API")
+                
+                response_text = response_text.strip()
+                logger.debug(f"Raw API response (first 500 chars): {response_text[:500]}")
+                
+                # Extract JSON - try multiple methods
                 json_str = response_text
+                
+                # Method 1: Check for markdown code blocks
                 if '```json' in json_str:
-                    json_str = json_str.split('```json')[1].split('```')[0]
+                    parts = json_str.split('```json')
+                    if len(parts) > 1:
+                        json_str = parts[1].split('```')[0].strip()
                 elif '```' in json_str:
-                    json_str = json_str.split('```')[1]
+                    parts = json_str.split('```')
+                    if len(parts) > 1:
+                        # Take the content between first set of backticks
+                        json_str = parts[1].strip()
+                
+                # Method 2: Try to find JSON object boundaries
+                if not json_str or json_str[0] != '{':
+                    # Look for first { and last }
+                    first_brace = json_str.find('{')
+                    last_brace = json_str.rfind('}')
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        json_str = json_str[first_brace:last_brace + 1]
+                
                 json_str = json_str.strip()
                 
-                result = json.loads(json_str)
+                # Validate JSON string is not empty
+                if not json_str:
+                    logger.error(f"Empty JSON string extracted from response.")
+                    logger.error(f"Original response (first 1000 chars): {response_text[:1000]}")
+                    raise ValueError("Empty JSON response from model")
+                
+                # Try to parse JSON
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error at position {e.pos}: {e.msg}")
+                    logger.error(f"Attempted to parse (first 1000 chars): {json_str[:1000]}")
+                    logger.error(f"Full response text (first 2000 chars): {response_text[:2000]}")
+                    
+                    # Try to fix common JSON issues
+                    # Remove any trailing commas before closing braces
+                    import re
+                    json_str_fixed = re.sub(r',\s*}', '}', json_str)
+                    json_str_fixed = re.sub(r',\s*]', ']', json_str_fixed)
+                    
+                    try:
+                        result = json.loads(json_str_fixed)
+                        logger.info("Successfully parsed JSON after fixing trailing commas")
+                    except json.JSONDecodeError:
+                        raise ValueError(f"Invalid JSON response from model: {e.msg} at position {e.pos}")
                 
                 # Parse results for each symbol
                 results = {}
