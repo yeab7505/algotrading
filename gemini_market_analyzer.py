@@ -336,6 +336,36 @@ Recent Price Action (Last 5 candles):
         
         return summary
     
+    def analyze_multi_timeframe_consolidation(self,
+                                              df_ltf: pd.DataFrame,
+                                              df_htf: pd.DataFrame,
+                                              symbol: str,
+                                              trade_side: str) -> Tuple[bool, str]:
+        """
+        Analyze consolidation across multiple timeframes for a single symbol.
+        
+        Args:
+            df_ltf: Lower timeframe DataFrame (e.g., 15m)
+            df_htf: Higher timeframe DataFrame (e.g., 1H)
+            symbol: Trading symbol
+            trade_side: 'BUY' or 'SELL'
+            
+        Returns:
+            Tuple of (is_consolidating/unsafe: bool, reasoning: str)
+        """
+        signals = [{
+            'symbol': symbol,
+            'trade_side': trade_side,
+            'df_ltf': df_ltf,
+            'df_htf': df_htf
+        }]
+        
+        results = self.analyze_batch_multi_timeframe_consolidation(signals)
+        
+        if symbol in results:
+            return results[symbol]
+        return True, "Analysis failed - no result returned"
+    
     def analyze_batch_multi_timeframe_consolidation(self,
                                                    signals: List[Dict],
                                                    max_retries: int = 3) -> Dict[str, Tuple[bool, str]]:
