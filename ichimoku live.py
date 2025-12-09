@@ -1488,7 +1488,7 @@ class ForwardIchimokuTrader:
             self.logger.info(f"Step 11: Setting leverage...")
             try:
                 choppy_value = self.df['choppy'].iloc[-1] if 'choppy' in self.df.columns else 50
-                leverage_to_set = self.leverage * 2 if choppy_value < 38 else self.leverage
+                leverage_to_set = self.leverage * 2 if choppy_value < 20 else self.leverage
                 self.client.futures_change_leverage(symbol=self.symbol, leverage=leverage_to_set)
                 self.logger.info(f"Set leverage to {leverage_to_set}x for {self.symbol}")
             except Exception as e:
