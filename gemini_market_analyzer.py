@@ -178,8 +178,7 @@ class GeminiMarketAnalyzer:
             'model': model,
             'messages': messages,
             'max_tokens': max_tokens,
-            'temperature': temperature,
-            'reasoning': {'enabled': True}  # Enable reasoning mode as per OpenRouter docs
+            'temperature': temperature
         }
         
         try:
@@ -646,7 +645,7 @@ For EACH symbol, synthesize both timeframes to decide if the proposed trade is s
    - If both are choppy -> UNSAFE.
 
 BUT IF THERE IS VERY STRONG TREND REVERSAL IN THE 15M TIMEFRAME, THEN IT IS SAFE TO TRADE.
-When UNSAFE, provide a concise, specific reason (2-4 sentences) citing alignment, consolidation, and volatility cues.
+
 
 One thing to consider is the fact that the data provided is fully close candle so in 1 hour data you might not see the candles and the volume spike you see in the 15min data if the time is between hours like HH:15, HH:30, HH:45.
 
