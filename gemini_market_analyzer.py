@@ -625,7 +625,7 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 response_text = self._make_api_request(
                     model=current_model,
                     messages=[
-                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses. Always respond with valid JSON only, no markdown formatting."},
+                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses. Always respond with valid JSON only, no markdown formatting. Do not include code fences. Output must be a single JSON object exactly matching the requested schema."},
                         {"role": "user", "content": combined_prompt}
                     ],
                     max_tokens=estimated_tokens,
@@ -688,7 +688,9 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         result = json.loads(json_str_fixed)
                         logger.info("Successfully parsed JSON after fixing trailing commas")
                     except json.JSONDecodeError:
-                        raise ValueError(f"Invalid JSON response from model: {e.msg} at position {e.pos}")
+                        # If still invalid, return a safe fallback marking all symbols unsafe
+                        logger.error("Model response is not valid JSON after fixes; blocking trades for safety.")
+                        return {s['symbol']: (True, f"Model returned invalid JSON; blocked trade. Error: {e.msg} at {e.pos}") for s in signals}
                 
                 # Parse results for each symbol
                 results = {}
