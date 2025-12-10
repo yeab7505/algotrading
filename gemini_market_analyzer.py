@@ -72,11 +72,11 @@ class GeminiMarketAnalyzer:
         for idx, model_name in enumerate(AVAILABLE_MODELS):
             try:
                 # Test the model with a simple request
-                # Use sufficient max_tokens to avoid truncation (at least 50 tokens)
+                # Use ample max_tokens to avoid truncation during init
                 test_response = self._make_api_request(
                     model=model_name,
                     messages=[{"role": "user", "content": "Say 'OK' if you can process requests."}],
-                    max_tokens=50
+                    max_tokens=200
                 )
                 # If successful, set as current model
                 self.current_model = model_name
@@ -120,11 +120,11 @@ class GeminiMarketAnalyzer:
             
             try:
                 # Test the model
-                # Use sufficient max_tokens to avoid truncation (at least 50 tokens)
+                # Use ample max_tokens to avoid truncation during switching
                 test_response = self._make_api_request(
                     model=model_name,
                     messages=[{"role": "user", "content": "Say 'OK' if you can process requests."}],
-                    max_tokens=50
+                    max_tokens=200
                 )
                 self.current_model = model_name
                 self.current_model_index = idx
