@@ -859,11 +859,25 @@ class ForwardIchimokuTrader:
         )
 
         # Gemini AI consolidation check - blocks trades in choppy markets
+        # Only call Gemini if we have exactly one valid signal (not both, not neither)
         if buy_signal or sell_signal:
+            # Ensure we have exactly one signal (not both)
+            if buy_signal and sell_signal:
+                self.logger.warning(f"Both buy and sell signals detected for {self.symbol}. Skipping Gemini analysis.")
+                return False, False
+            
             try:
                 if hasattr(self, 'gemini') and self.gemini is not None:
-                    # Determine proposed trade side
+                    # Re-check signals right before calling Gemini to ensure they're still valid
+                    # This prevents calling Gemini when signals have changed
+                    if not (buy_signal or sell_signal):
+                        self.logger.debug(f"Signal disappeared before Gemini call for {self.symbol}. Skipping analysis.")
+                        return buy_signal, sell_signal
+                    
+                    # Determine proposed trade side - should be unambiguous at this point
                     trade_side = 'BUY' if buy_signal else 'SELL'
+                    
+                    self.logger.debug(f"Calling Gemini analysis for {self.symbol} with {trade_side} signal")
                     
                     # Use the new Multi-Timeframe Analysis (Single API Request)
                     is_consolidating, reasoning = self.gemini.analyze_multi_timeframe_consolidation(
