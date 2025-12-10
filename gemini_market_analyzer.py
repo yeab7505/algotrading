@@ -168,7 +168,8 @@ class GeminiMarketAnalyzer:
             'model': model,
             'messages': messages,
             'max_tokens': max_tokens,
-            'temperature': temperature
+            'temperature': temperature,
+            'reasoning': {'enabled': True}  # Enable reasoning for better analysis
         }
         
         try:
@@ -194,8 +195,16 @@ class GeminiMarketAnalyzer:
             message = choice.get('message', {})
             content = message.get('content', '')
             # Some providers return reasoning text separate from content
-            if not content and message.get('reasoning'):
-                content = message.get('reasoning')
+            if not content and 'reasoning' in message:
+                content = message.get('reasoning', '')
+
+            # Check reasoning_details field (OpenRouter specific)
+            if not content and 'reasoning_details' in message:
+                reasoning_details = message.get('reasoning_details')
+                if isinstance(reasoning_details, dict) and 'reasoning' in reasoning_details:
+                    content = reasoning_details['reasoning']
+                elif isinstance(reasoning_details, str):
+                    content = reasoning_details
             
             # Check finish_reason to understand why content might be empty
             finish_reason = choice.get('finish_reason', '')
@@ -700,8 +709,36 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         reasoning = symbol_result.get('reasoning', 'No reasoning provided')
                         results[symbol] = (is_unsafe, reasoning)
                     else:
-                        # Fallback if symbol not in response
-                        results[symbol] = (True, "Symbol not found in batch response")
+                        # Try to parse from reasoning text if JSON is invalid
+                        # Look for patterns like "is_unsafe": true/false in the response text
+                        import re
+                        is_unsafe_fallback = True  # Default to unsafe
+                        reasoning_fallback = f"Could not parse JSON response. Raw response: {response_text[:200]}"
+
+                        # Search for is_unsafe field in the text - more flexible pattern
+                        unsafe_pattern = rf'"{symbol}"\s*:\s*\{{\s*"is_unsafe"\s*:\s*(true|false)'
+                        unsafe_match = re.search(unsafe_pattern, response_text, re.IGNORECASE | re.DOTALL)
+                        if unsafe_match:
+                            is_unsafe_fallback = unsafe_match.group(1).lower() == 'true'
+                            # Try to extract reasoning too
+                            reasoning_pattern = r'"reasoning"\s*:\s*"([^"]*)"'
+                            reasoning_match = re.search(reasoning_pattern, response_text, re.IGNORECASE | re.DOTALL)
+                            if reasoning_match:
+                                reasoning_fallback = reasoning_match.group(1).replace('\\n', ' ').replace('\\', '').strip()
+                            else:
+                                reasoning_fallback = "Parsed safety decision from response text"
+                            logger.info(f"Parsed safety decision for {symbol} from reasoning text: unsafe={is_unsafe_fallback}")
+                        else:
+                            # Try simpler pattern without symbol
+                            unsafe_simple = re.search(r'is_unsafe"\s*:\s*(true|false)', response_text, re.IGNORECASE)
+                            if unsafe_simple:
+                                is_unsafe_fallback = unsafe_simple.group(1).lower() == 'true'
+                                reasoning_fallback = "Parsed safety decision from response text"
+                                logger.info(f"Simple parse for {symbol}: unsafe={is_unsafe_fallback}")
+                            else:
+                                logger.warning(f"Could not find safety decision for {symbol} in response. Defaulting to unsafe.")
+
+                        results[symbol] = (is_unsafe_fallback, reasoning_fallback)
                 
                 logger.info(f"Batch Multi-TF Analysis ({current_model}): Processed {len(signals)} symbols")
                 return results
