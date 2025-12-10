@@ -695,6 +695,8 @@ Signs of pullback (NOT reversal):
     If trendline is respected -> pullback
     If trendline breaks -> early sign of reversal
 
+make sure to mention the key factors that you used to make the decision. Also consider all the factors that are mentioned in the definitions.
+
 For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the response:
 {{
   "{signals[0]['symbol']}": {{
