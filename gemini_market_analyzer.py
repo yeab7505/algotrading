@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Daily request limit (OpenRouter has generous limits)
 DAILY_REQUEST_LIMIT = 10000
 # Cap for response tokens; configurable via env, clamped to 2k-16k
-MAX_RESPONSE_TOKENS = max(2000, min(16000, int(os.getenv("OPENROUTER_MAX_TOKENS", "12000"))))
+MAX_RESPONSE_TOKENS = max(2000, min(16000, int(os.getenv("OPENROUTER_MAX_TOKENS", "20000"))))
 
 # OpenRouter API endpoint
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -625,7 +625,7 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 response_text = self._make_api_request(
                     model=current_model,
                     messages=[
-                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses. Always respond with valid JSON only, no markdown formatting. Do not include code fences. Output must be a single JSON object exactly matching the requested schema."},
+                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses. Always respond with valid JSON only, no markdown formatting. Do not include code fences. Output must be a single JSON object exactly matching the requested schema. If you cannot comply, return a JSON object with is_unsafe=true and a concise reasoning."},
                         {"role": "user", "content": combined_prompt}
                     ],
                     max_tokens=estimated_tokens,
@@ -656,7 +656,6 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 
                 # Method 2: Try to find JSON object boundaries
                 if not json_str or json_str[0] != '{':
-                    # Look for first { and last }
                     first_brace = json_str.find('{')
                     last_brace = json_str.rfind('}')
                     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
@@ -664,11 +663,11 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 
                 json_str = json_str.strip()
                 
-                # Validate JSON string is not empty
-                if not json_str:
-                    logger.error(f"Empty JSON string extracted from response.")
-                    logger.error(f"Original response (first 1000 chars): {response_text[:1000]}")
-                    raise ValueError("Empty JSON response from model")
+                # If still not JSON-like, fallback: block trades with reasoning from text
+                if not json_str or not json_str.startswith('{'):
+                    logger.error("Model returned non-JSON response after extraction; blocking for safety.")
+                    brief = (response_text[:180] + '...') if len(response_text) > 200 else response_text
+                    return {s['symbol']: (True, f"Model returned non-JSON response: {brief}") for s in signals}
                 
                 # Try to parse JSON
                 try:
@@ -679,7 +678,6 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                     logger.error(f"Full response text (first 2000 chars): {response_text[:2000]}")
                     
                     # Try to fix common JSON issues
-                    # Remove any trailing commas before closing braces
                     import re
                     json_str_fixed = re.sub(r',\s*}', '}', json_str)
                     json_str_fixed = re.sub(r',\s*]', ']', json_str_fixed)
