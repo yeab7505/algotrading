@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Daily request limit (OpenRouter has generous limits)
 DAILY_REQUEST_LIMIT = 10000
+# Cap for response tokens; configurable via env, clamped to 2k-16k
+MAX_RESPONSE_TOKENS = max(2000, min(16000, int(os.getenv("OPENROUTER_MAX_TOKENS", "12000"))))
 
 # OpenRouter API endpoint
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -139,7 +141,7 @@ class GeminiMarketAnalyzer:
         logger.error("No available models remaining")
         return False
     
-    def _make_api_request(self, model: str, messages: List[Dict], max_tokens: int = 8000, temperature: float = 0.3) -> str:
+    def _make_api_request(self, model: str, messages: List[Dict], max_tokens: int = MAX_RESPONSE_TOKENS, temperature: float = 0.3) -> str:
         """
         Make an API request to OpenRouter.
         
@@ -191,6 +193,9 @@ class GeminiMarketAnalyzer:
             choice = result['choices'][0]
             message = choice.get('message', {})
             content = message.get('content', '')
+            # Some providers return reasoning text separate from content
+            if not content and message.get('reasoning'):
+                content = message.get('reasoning')
             
             # Check finish_reason to understand why content might be empty
             finish_reason = choice.get('finish_reason', '')
@@ -537,6 +542,7 @@ For EACH symbol, synthesize both timeframes to decide if the proposed trade is s
    - If both are choppy -> UNSAFE.
 
 BUT IF THERE IS VERY STRONG TREND REVERSAL IN THE 15M TIMEFRAME, THEN IT IS SAFE TO TRADE.
+When UNSAFE, provide a concise, specific reason (2-4 sentences) citing alignment, consolidation, and volatility cues.
 
 One thing to consider is the fact that the data provided is fully close candle so in 1 hour data you might not see the candles and the volume spike you see in the 15min data if the time is between hours like HH:15, HH:30, HH:45.
 
@@ -613,9 +619,8 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
             try:
                 # Use OpenRouter API format
                 # Calculate max_tokens based on number of symbols (more symbols = more tokens needed)
-                # Base: 1000 tokens per symbol for JSON response, minimum 4000, maximum 16000
-                # Increased significantly to handle full JSON responses
-                estimated_tokens = max(4000, min(16000, len(signals) * 1000))
+                # Base: 1000 tokens per symbol for JSON response, min 4000, capped by MAX_RESPONSE_TOKENS
+                estimated_tokens = max(4000, min(MAX_RESPONSE_TOKENS, len(signals) * 1000))
                 
                 response_text = self._make_api_request(
                     model=current_model,
@@ -709,7 +714,7 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                     # Retry with increased max_tokens if we haven't exhausted retries
                     if attempt < max_retries:
                         # Double the token limit for next attempt
-                        estimated_tokens = min(16000, estimated_tokens * 2)
+                        estimated_tokens = min(MAX_RESPONSE_TOKENS, estimated_tokens * 2)
                         logger.info(f"Retrying with increased max_tokens: {estimated_tokens}")
                         continue
                     else:
