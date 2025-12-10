@@ -169,7 +169,7 @@ class GeminiMarketAnalyzer:
             'messages': messages,
             'max_tokens': max_tokens,
             'temperature': temperature,
-            'reasoning': {'enabled': True}  # Enable reasoning for better analysis
+            'reasoning': {'enabled': True}  # Enable reasoning mode as per OpenRouter docs
         }
         
         try:
@@ -191,20 +191,27 @@ class GeminiMarketAnalyzer:
                 raise Exception(f"Invalid API response: {error_msg}")
             
             # Extract content - handle different possible response formats
+            # Following OpenRouter API documentation pattern
             choice = result['choices'][0]
             message = choice.get('message', {})
+            
+            # Primary: get content field
             content = message.get('content', '')
-            # Some providers return reasoning text separate from content
-            if not content and 'reasoning' in message:
-                content = message.get('reasoning', '')
-
-            # Check reasoning_details field (OpenRouter specific)
-            if not content and 'reasoning_details' in message:
-                reasoning_details = message.get('reasoning_details')
-                if isinstance(reasoning_details, dict) and 'reasoning' in reasoning_details:
-                    content = reasoning_details['reasoning']
-                elif isinstance(reasoning_details, str):
-                    content = reasoning_details
+            
+            # Fallback: check reasoning_details (OpenRouter reasoning mode)
+            # reasoning_details may contain the actual reasoning text
+            reasoning_details = message.get('reasoning_details')
+            if isinstance(reasoning_details, dict):
+                # Some providers put reasoning text in reasoning_details
+                reasoning_text = reasoning_details.get('reasoning', '') or reasoning_details.get('text', '')
+                if reasoning_text and not content:
+                    content = reasoning_text
+            elif isinstance(reasoning_details, str) and not content:
+                content = reasoning_details
+            
+            # Fallback: check reasoning field directly
+            if not content and message.get('reasoning'):
+                content = message.get('reasoning')
             
             # Check finish_reason to understand why content might be empty
             finish_reason = choice.get('finish_reason', '')
@@ -482,6 +489,67 @@ Recent Price Action (Last 5 candles):
             return results[symbol]
         return True, "Analysis failed - no result returned"
     
+    def _extract_info_from_text_response(self, text: str, signals: List[Dict]) -> Optional[Dict[str, Tuple[bool, str]]]:
+        """
+        Try to extract trading decision information from a text response when JSON parsing fails.
+        
+        Args:
+            text: The text response from the model
+            signals: List of signals being analyzed
+            
+        Returns:
+            Dict mapping symbol to (is_unsafe, reasoning) if extraction succeeds, None otherwise
+        """
+        results = {}
+        text_lower = text.lower()
+        
+        for signal in signals:
+            symbol = signal['symbol']
+            trade_side = signal['trade_side']
+            
+            # Look for symbol mentions and safety indicators
+            symbol_mentioned = symbol.lower() in text_lower or symbol.replace('USDT', '').lower() in text_lower
+            
+            # Try to detect unsafe indicators
+            unsafe_keywords = ['unsafe', 'not safe', 'block', 'avoid', 'consolidat', 'choppy', 'counter-trend', 
+                             'contradict', 'wait', 'not aligned', 'trend mismatch']
+            safe_keywords = ['safe', 'good', 'aligned', 'trending', 'clear trend', 'support']
+            
+            unsafe_count = sum(1 for kw in unsafe_keywords if kw in text_lower)
+            safe_count = sum(1 for kw in safe_keywords if kw in text_lower)
+            
+            # Extract a relevant snippet around the symbol if mentioned
+            reasoning = "Analysis completed"
+            if symbol_mentioned:
+                # Try to find a sentence or two mentioning the symbol
+                symbol_pos = text_lower.find(symbol.lower())
+                if symbol_pos == -1:
+                    symbol_pos = text_lower.find(symbol.replace('USDT', '').lower())
+                
+                if symbol_pos != -1:
+                    # Extract context around symbol mention
+                    start = max(0, symbol_pos - 200)
+                    end = min(len(text), symbol_pos + 500)
+                    snippet = text[start:end].strip()
+                    # Clean up snippet
+                    sentences = snippet.split('.')
+                    relevant = '. '.join(sentences[:3]) if len(sentences) > 3 else snippet
+                    reasoning = relevant[:300]  # Limit length
+            else:
+                # Use first few sentences of the response
+                sentences = text.split('.')
+                reasoning = '. '.join(sentences[:2])[:300] if len(sentences) > 2 else text[:300]
+            
+            # Determine if unsafe based on keyword analysis
+            is_unsafe = unsafe_count > safe_count if (unsafe_count > 0 or safe_count > 0) else True
+            
+            # Add prefix to indicate this came from text parsing
+            reasoning = f"[Text Analysis] {reasoning}"
+            
+            results[symbol] = (is_unsafe, reasoning)
+        
+        return results if results else None
+    
     def analyze_batch_multi_timeframe_consolidation(self,
                                                    signals: List[Dict],
                                                    max_retries: int = 3) -> Dict[str, Tuple[bool, str]]:
@@ -672,11 +740,18 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 
                 json_str = json_str.strip()
                 
-                # If still not JSON-like, fallback: block trades with reasoning from text
+                # If still not JSON-like, try to extract useful information from text response
                 if not json_str or not json_str.startswith('{'):
-                    logger.error("Model returned non-JSON response after extraction; blocking for safety.")
-                    brief = (response_text[:180] + '...') if len(response_text) > 200 else response_text
-                    return {s['symbol']: (True, f"Model returned non-JSON response: {brief}") for s in signals}
+                    logger.warning("Model returned non-JSON response. Attempting to extract information from text.")
+                    # Try to parse the text response to extract useful information
+                    extracted_results = self._extract_info_from_text_response(response_text, signals)
+                    if extracted_results:
+                        logger.info("Successfully extracted information from text response")
+                        return extracted_results
+                    else:
+                        # If we can't extract useful info, block with the text as reasoning
+                        brief = (response_text[:500] + '...') if len(response_text) > 500 else response_text
+                        return {s['symbol']: (True, f"Analysis response (non-JSON): {brief}") for s in signals}
                 
                 # Try to parse JSON
                 try:
@@ -695,9 +770,15 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         result = json.loads(json_str_fixed)
                         logger.info("Successfully parsed JSON after fixing trailing commas")
                     except json.JSONDecodeError:
-                        # If still invalid, return a safe fallback marking all symbols unsafe
+                        # If still invalid, try to extract info from text before blocking
+                        logger.warning("JSON parsing failed after fixes. Attempting to extract info from text.")
+                        extracted_results = self._extract_info_from_text_response(response_text, signals)
+                        if extracted_results:
+                            logger.info("Successfully extracted information from text response after JSON failure")
+                            return extracted_results
+                        # If we can't extract useful info, block with error details
                         logger.error("Model response is not valid JSON after fixes; blocking trades for safety.")
-                        return {s['symbol']: (True, f"Model returned invalid JSON; blocked trade. Error: {e.msg} at {e.pos}") for s in signals}
+                        return {s['symbol']: (True, f"Invalid JSON response. Error: {e.msg} at position {e.pos}") for s in signals}
                 
                 # Parse results for each symbol
                 results = {}
@@ -709,36 +790,8 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         reasoning = symbol_result.get('reasoning', 'No reasoning provided')
                         results[symbol] = (is_unsafe, reasoning)
                     else:
-                        # Try to parse from reasoning text if JSON is invalid
-                        # Look for patterns like "is_unsafe": true/false in the response text
-                        import re
-                        is_unsafe_fallback = True  # Default to unsafe
-                        reasoning_fallback = f"Could not parse JSON response. Raw response: {response_text[:200]}"
-
-                        # Search for is_unsafe field in the text - more flexible pattern
-                        unsafe_pattern = rf'"{symbol}"\s*:\s*\{{\s*"is_unsafe"\s*:\s*(true|false)'
-                        unsafe_match = re.search(unsafe_pattern, response_text, re.IGNORECASE | re.DOTALL)
-                        if unsafe_match:
-                            is_unsafe_fallback = unsafe_match.group(1).lower() == 'true'
-                            # Try to extract reasoning too
-                            reasoning_pattern = r'"reasoning"\s*:\s*"([^"]*)"'
-                            reasoning_match = re.search(reasoning_pattern, response_text, re.IGNORECASE | re.DOTALL)
-                            if reasoning_match:
-                                reasoning_fallback = reasoning_match.group(1).replace('\\n', ' ').replace('\\', '').strip()
-                            else:
-                                reasoning_fallback = "Parsed safety decision from response text"
-                            logger.info(f"Parsed safety decision for {symbol} from reasoning text: unsafe={is_unsafe_fallback}")
-                        else:
-                            # Try simpler pattern without symbol
-                            unsafe_simple = re.search(r'is_unsafe"\s*:\s*(true|false)', response_text, re.IGNORECASE)
-                            if unsafe_simple:
-                                is_unsafe_fallback = unsafe_simple.group(1).lower() == 'true'
-                                reasoning_fallback = "Parsed safety decision from response text"
-                                logger.info(f"Simple parse for {symbol}: unsafe={is_unsafe_fallback}")
-                            else:
-                                logger.warning(f"Could not find safety decision for {symbol} in response. Defaulting to unsafe.")
-
-                        results[symbol] = (is_unsafe_fallback, reasoning_fallback)
+                        # Fallback if symbol not in response
+                        results[symbol] = (True, "Symbol not found in batch response")
                 
                 logger.info(f"Batch Multi-TF Analysis ({current_model}): Processed {len(signals)} symbols")
                 return results
