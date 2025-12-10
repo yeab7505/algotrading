@@ -29,9 +29,12 @@ MAX_RESPONSE_TOKENS = max(2000, min(16000, int(os.getenv("OPENROUTER_MAX_TOKENS"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Available models in order of preference
+# Updated with valid OpenRouter model IDs
 AVAILABLE_MODELS = [
-    'alibaba/tongyi-deepresearch-30b-a3b:free',  # Tongyi 30B model
-    'alibaba/tongyi-pro',  # Fallback to Tongyi Pro if available
+    'alibaba/tongyi-deepresearch-30b-a3b:free',  # Tongyi 30B free model (may have availability issues)
+    'alibaba/tongyi-deepresearch-30b-a3b',  # Tongyi 30B paid model (more reliable)
+    'qwen/qwen-2.5-72b-instruct:free',  # Alternative free model
+    'meta-llama/llama-3.1-70b-instruct:free',  # Another free alternative
 ]
 
 class GeminiMarketAnalyzer:
@@ -88,10 +91,17 @@ class GeminiMarketAnalyzer:
                 logger.info(f"OpenRouter model initialized successfully: {model_name}")
                 return
             except Exception as e:
-                logger.warning(f"Failed to initialize {model_name}: {e}")
+                error_str = str(e)
+                # Don't mark 503 errors as permanent failures - they're temporary
+                if self._is_service_unavailable_error(e):
+                    logger.warning(f"Model {model_name} temporarily unavailable (503). Will retry later.")
+                elif '400' in error_str and 'not a valid model' in error_str.lower():
+                    logger.warning(f"Model {model_name} is not valid. Skipping.")
+                else:
+                    logger.warning(f"Failed to initialize {model_name}: {e}")
                 continue
         
-        logger.error("Failed to initialize any OpenRouter model")
+        logger.error("Failed to initialize any OpenRouter model. All models unavailable or invalid.")
         self.current_model = None
     
     def _reset_exhausted_models(self):
@@ -269,6 +279,23 @@ class GeminiMarketAnalyzer:
         # Check for requests library exceptions
         if isinstance(error, requests.exceptions.HTTPError):
             if hasattr(error, 'response') and error.response.status_code == 429:
+                return True
+        
+        return False
+    
+    def _is_service_unavailable_error(self, error: Exception) -> bool:
+        """Check if error is a service unavailable (503) error that should trigger retry."""
+        error_str = str(error)
+        if '503' in error_str or 'service unavailable' in error_str.lower() or 'no instances available' in error_str.lower():
+            return True
+        
+        # Check for HTTP status code
+        if hasattr(error, 'status_code') and error.status_code == 503:
+            return True
+        
+        # Check for requests library exceptions
+        if isinstance(error, requests.exceptions.HTTPError):
+            if hasattr(error, 'response') and error.response.status_code == 503:
                 return True
         
         return False
@@ -798,8 +825,25 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 
             except Exception as e:
                 error_str = str(e)
+                # Check if it's a service unavailable (503) error - retry with delay
+                if self._is_service_unavailable_error(e):
+                    logger.warning(f"Service unavailable (503) for {current_model}: {e}")
+                    if attempt < max_retries:
+                        # Wait before retrying (exponential backoff)
+                        wait_time = 2 ** attempt  # 1s, 2s, 4s
+                        logger.info(f"Waiting {wait_time}s before retry (attempt {attempt + 1}/{max_retries + 1})")
+                        time.sleep(wait_time)
+                        # Try switching to next model if available
+                        if self._switch_to_next_model():
+                            logger.info(f"Switched to alternative model for retry")
+                            continue
+                        else:
+                            continue  # Retry same model after delay
+                    else:
+                        logger.error(f"Service unavailable after all retries: {e}")
+                        return {s['symbol']: (True, f"Service temporarily unavailable: {e}") for s in signals}
                 # Check if it's a max_tokens truncation issue
-                if 'truncated' in error_str.lower() or 'max_tokens' in error_str.lower() or 'finish_reason' in error_str.lower():
+                elif 'truncated' in error_str.lower() or 'max_tokens' in error_str.lower() or 'finish_reason' in error_str.lower():
                     logger.warning(f"Response truncated for {current_model}: {e}")
                     # Retry with increased max_tokens if we haven't exhausted retries
                     if attempt < max_retries:
