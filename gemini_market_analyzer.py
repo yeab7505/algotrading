@@ -28,7 +28,7 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Available models in order of preference
 AVAILABLE_MODELS = [
-    'alibaba/tongyi-deepresearch-30b-a3b',  # Tongyi 30B model
+    'alibaba/tongyi-deepresearch-30b-a3b:free',  # Tongyi 30B model
     'alibaba/tongyi-pro',  # Fallback to Tongyi Pro if available
 ]
 
