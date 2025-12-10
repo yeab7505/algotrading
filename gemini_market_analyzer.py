@@ -728,7 +728,7 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                 response_text = self._make_api_request(
                     model=current_model,
                     messages=[
-                        {"role": "system", "content": "You are an expert crypto market analyst. Analyze market structure and provide JSON responses. Always respond with valid JSON only, no markdown formatting. Do not include code fences. Output must be a single JSON object exactly matching the requested schema. If you cannot comply, return a JSON object with is_unsafe=true and a concise reasoning."},
+                        {"role": "system", "content": "You are an expert crypto market analyst. Your ONLY task is to return a valid JSON object. CRITICAL RULES: 1) Return ONLY the JSON object, nothing else. 2) Do NOT include any explanatory text before or after the JSON. 3) Do NOT use markdown code fences. 4) Do NOT explain your reasoning outside the JSON. 5) Start your response with '{' and end with '}'. All reasoning MUST be inside the 'reasoning' field of the JSON."},
                         {"role": "user", "content": combined_prompt}
                     ],
                     max_tokens=estimated_tokens,
@@ -758,18 +758,67 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         json_str = parts[1].strip()
                 
                 # Method 2: Try to find JSON object boundaries
-                if not json_str or json_str[0] != '{':
-                    first_brace = json_str.find('{')
-                    last_brace = json_str.rfind('}')
-                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                        json_str = json_str[first_brace:last_brace + 1]
-                
-                json_str = json_str.strip()
-                
-                # If still not JSON-like, try to extract useful information from text response
-                if not json_str or not json_str.startswith('{'):
+                # Find the first opening brace
+                first_brace = json_str.find('{')
+                if first_brace != -1:
+                    # Use JSONDecoder to parse from the first brace and ignore trailing data
+                    decoder = json.JSONDecoder()
+                    try:
+                        result, end_pos = decoder.raw_decode(json_str, first_brace)
+                        # Successfully parsed JSON, ignoring any text before or after
+                        logger.debug(f"Successfully extracted JSON from response (parsed {end_pos - first_brace} chars)")
+                    except json.JSONDecodeError as e:
+                        # If raw_decode fails, fall back to manual extraction
+                        logger.debug(f"raw_decode failed: {e}. Trying manual extraction.")
+                        # Count braces to find matching closing brace
+                        brace_count = 0
+                        start = first_brace
+                        end = -1
+                        for i in range(first_brace, len(json_str)):
+                            if json_str[i] == '{':
+                                brace_count += 1
+                            elif json_str[i] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end = i + 1
+                                    break
+                        
+                        if end != -1:
+                            json_str = json_str[start:end]
+                            json_str = json_str.strip()
+                        else:
+                            # Couldn't find matching brace, use original logic
+                            json_str = json_str.strip()
+                        
+                        # Try to parse the extracted JSON
+                        try:
+                            result = json.loads(json_str)
+                        except json.JSONDecodeError as e2:
+                            logger.error(f"JSON decode error at position {e2.pos}: {e2.msg}")
+                            logger.error(f"Attempted to parse (first 1000 chars): {json_str[:1000]}")
+                            logger.error(f"Full response text (first 2000 chars): {response_text[:2000]}")
+                            
+                            # Try to fix common JSON issues
+                            import re
+                            json_str_fixed = re.sub(r',\s*}', '}', json_str)
+                            json_str_fixed = re.sub(r',\s*]', ']', json_str_fixed)
+                            
+                            try:
+                                result = json.loads(json_str_fixed)
+                                logger.info("Successfully parsed JSON after fixing trailing commas")
+                            except json.JSONDecodeError:
+                                # If still invalid, try to extract info from text before blocking
+                                logger.warning("JSON parsing failed after fixes. Attempting to extract info from text.")
+                                extracted_results = self._extract_info_from_text_response(response_text, signals)
+                                if extracted_results:
+                                    logger.info("Successfully extracted information from text response after JSON failure")
+                                    return extracted_results
+                                # If we can't extract useful info, block with error details
+                                logger.error("Model response is not valid JSON after fixes; blocking trades for safety.")
+                                return {s['symbol']: (True, f"Invalid JSON response. Error: {e2.msg} at position {e2.pos}") for s in signals}
+                else:
+                    # No JSON found, try to extract useful information from text response
                     logger.warning("Model returned non-JSON response. Attempting to extract information from text.")
-                    # Try to parse the text response to extract useful information
                     extracted_results = self._extract_info_from_text_response(response_text, signals)
                     if extracted_results:
                         logger.info("Successfully extracted information from text response")
@@ -778,33 +827,6 @@ For EACH symbol, respond ONLY in this JSON format. Include ALL symbols in the re
                         # If we can't extract useful info, block with the text as reasoning
                         brief = (response_text[:500] + '...') if len(response_text) > 500 else response_text
                         return {s['symbol']: (True, f"Analysis response (non-JSON): {brief}") for s in signals}
-                
-                # Try to parse JSON
-                try:
-                    result = json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON decode error at position {e.pos}: {e.msg}")
-                    logger.error(f"Attempted to parse (first 1000 chars): {json_str[:1000]}")
-                    logger.error(f"Full response text (first 2000 chars): {response_text[:2000]}")
-                    
-                    # Try to fix common JSON issues
-                    import re
-                    json_str_fixed = re.sub(r',\s*}', '}', json_str)
-                    json_str_fixed = re.sub(r',\s*]', ']', json_str_fixed)
-                    
-                    try:
-                        result = json.loads(json_str_fixed)
-                        logger.info("Successfully parsed JSON after fixing trailing commas")
-                    except json.JSONDecodeError:
-                        # If still invalid, try to extract info from text before blocking
-                        logger.warning("JSON parsing failed after fixes. Attempting to extract info from text.")
-                        extracted_results = self._extract_info_from_text_response(response_text, signals)
-                        if extracted_results:
-                            logger.info("Successfully extracted information from text response after JSON failure")
-                            return extracted_results
-                        # If we can't extract useful info, block with error details
-                        logger.error("Model response is not valid JSON after fixes; blocking trades for safety.")
-                        return {s['symbol']: (True, f"Invalid JSON response. Error: {e.msg} at position {e.pos}") for s in signals}
                 
                 # Parse results for each symbol
                 results = {}
