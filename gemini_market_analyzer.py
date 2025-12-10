@@ -31,6 +31,7 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Available models in order of preference
 # Updated with valid OpenRouter model IDs
 AVAILABLE_MODELS = [
+    'allenai/olmo-3-32b-think:free',
     'alibaba/tongyi-deepresearch-30b-a3b:free',  # Tongyi 30B free model (may have availability issues)
     'alibaba/tongyi-deepresearch-30b-a3b',  # Tongyi 30B paid model (more reliable)
     'qwen/qwen-2.5-72b-instruct:free',  # Alternative free model
