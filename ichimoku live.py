@@ -1338,9 +1338,9 @@ class ForwardIchimokuTrader:
             side = Client.SIDE_SELL if self.position == 1 else Client.SIDE_BUY
             sl_params = {
                 'symbol': self.symbol, 'side': side, 'type': 'STOP_MARKET',
-                'quantity': self.position_size, 'stopPrice': self.sl_level, 'reduceOnly': True
+                'quantity': self.position_size, 'stopPrice': self.sl_level, 'reduceOnly': True,'workingType': 'MARK_PRICE',
             }
-            sl_order = self.client.futures_algo_order(**sl_params)
+            sl_order = self.client.futures_create_order(**sl_params)
             self.orderid = sl_order['orderId']
             self.logger.info(f"SUCCESS: Updated trailing stop. New SL order ID: {self.orderid} at {self.sl_level}")
 
@@ -1710,9 +1710,10 @@ class ForwardIchimokuTrader:
                     'type': 'TAKE_PROFIT_MARKET',
                     'quantity': tp_qty_1,
                     'stopPrice': self.tp_level_1,
-                    'reduceOnly': True
+                    'reduceOnly': True,
+                    'workingType': 'MARK_PRICE',
                 }
-                tp1_order = self.client.futures_algo_order(**tp1_params)
+                tp1_order = self.client.futures_create_order(**tp1_params)
                 self.tp_orderid_1 = tp1_order['orderId']
                 self.tp_orderid = self.tp_orderid_1  # Keep for backward compatibility
                 self.logger.info(f"SUCCESS: Take profit order 1 placed. ID: {self.tp_orderid_1}, Price: {self.tp_level_1}, Qty: {tp_qty_1}")
@@ -1726,9 +1727,10 @@ class ForwardIchimokuTrader:
                     'type': 'TAKE_PROFIT_MARKET',
                     'quantity': tp_qty_2,
                     'stopPrice': self.tp_level_2,
-                    'reduceOnly': True
+                    'reduceOnly': True,
+                    'workingType': 'MARK_PRICE',
                 }
-                tp2_order = self.client.futures_algo_order(**tp2_params)
+                tp2_order = self.client.futures_create_order(**tp2_params)
                 self.tp_orderid_2 = tp2_order['orderId']
                 self.logger.info(f"SUCCESS: Take profit order 2 placed. ID: {self.tp_orderid_2}, Price: {self.tp_level_2}, Qty: {tp_qty_2}")
             except Exception as e:
@@ -1741,9 +1743,10 @@ class ForwardIchimokuTrader:
                     'type': 'TAKE_PROFIT_MARKET',
                     'quantity': tp_qty_3,
                     'stopPrice': self.tp_level_3,
-                    'reduceOnly': True
+                    'reduceOnly': True,
+                    'workingType': 'MARK_PRICE',
                 }
-                tp3_order = self.client.futures_algo_order(**tp3_params)
+                tp3_order = self.client.futures_create_order(**tp3_params)
                 self.tp_orderid_3 = tp3_order['orderId']
                 self.logger.info(f"SUCCESS: Take profit order 3 placed. ID: {self.tp_orderid_3}, Price: {self.tp_level_3}, Qty: {tp_qty_3}")
             except Exception as e:
