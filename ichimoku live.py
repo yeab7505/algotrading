@@ -1604,14 +1604,14 @@ class ForwardIchimokuTrader:
                     'type': Client.ORDER_TYPE_MARKET,
                     'quantity': self.position_size
                 }
-                entry_order = self.client.futures_algo_order(**order_params)
+                entry_order = self.client.futures_create_order(**order_params)
                 self.logger.info(f"SUCCESS: Entry order placed. Full response: {entry_order}")
 
                 actual_entry_price = float(entry_order.get('avgPrice', 0.0))
 
                 if actual_entry_price == 0.0:
                     time.sleep(0.5)  # Wait for fill
-                    order_details = self.client.futures_get_order(symbol=self.symbol, orderId=entry_order['orderId'])
+                    order_details = self.client.futures_create_order(symbol=self.symbol, orderId=entry_order['orderId'])
                     actual_entry_price = float(order_details.get('avgPrice', 0.0))
 
                 if actual_entry_price == 0.0:
