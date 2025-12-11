@@ -1611,7 +1611,7 @@ class ForwardIchimokuTrader:
 
                 if actual_entry_price == 0.0:
                     time.sleep(0.5)  # Wait for fill
-                    order_details = self.client.futures_create_order(symbol=self.symbol, orderId=entry_order['orderId'])
+                    order_details = self.client.futures_get_order(symbol=self.symbol, orderId=entry_order['orderId'])
                     actual_entry_price = float(order_details.get('avgPrice', 0.0))
 
                 if actual_entry_price == 0.0:
@@ -1696,7 +1696,7 @@ class ForwardIchimokuTrader:
                     'quantity': self.position_size, 'stopPrice': self.sl_level, 
                     'reduceOnly': True
                 }
-                sl_order = self.client.futures_algo_order(**sl_params)
+                sl_order = self.client.futures_create_order(**sl_params)
                 self.orderid = sl_order['orderId']
                 self.logger.info(f"SUCCESS: Stop loss order placed. ID: {self.orderid}")
             except Exception as e:
@@ -1875,7 +1875,7 @@ class ForwardIchimokuTrader:
         try:
             position = self.client.futures_position_information(symbol=self.symbol)
             if position and float(position[0]['positionAmt']) != 0:
-                self.client.futures_algo_order(
+                self.client.futures_create_order(
                     symbol=self.symbol,
                     type='MARKET',
                     side='SELL' if float(position[0]['positionAmt']) > 0 else 'BUY',
