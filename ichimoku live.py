@@ -964,13 +964,16 @@ class ForwardIchimokuTrader:
         """Check for TP/SL hits and add them to trade report"""
         try:
             # Get orders for the current symbol first to check for TP/SL hits
+            # Check both regular and conditional orders
             symbol_orders = self.client.futures_get_all_orders(symbol=self.symbol)
+            conditional_orders = self.client.papi_get_um_conditional_all_orders(symbol=self.symbol)
+            all_orders = symbol_orders + conditional_orders
             
             # Check for TP/SL hit orders and add to tradereport
-            self.logger.debug(f"Checking {len(symbol_orders)} orders for {self.symbol} for TP/SL hits...")
+            self.logger.debug(f"Checking {len(all_orders)} orders for {self.symbol} for TP/SL hits...")
             self.logger.debug(f"Current position state: {self.position}, entry_price: {self.entry_price}, position_size: {self.position_size}")
             hit_detected_via_orders = False
-            for order in symbol_orders:
+            for order in all_orders:
                 try:
                     order_type = order.get('type')
                     order_status = order.get('status')
@@ -983,7 +986,7 @@ class ForwardIchimokuTrader:
                 # Only consider filled reduce-only TP/SL orders
                 if (
                     order_status == 'FILLED' and
-                    order_type in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT'] and
+                    order_type in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT', 'STOP'] and
                     is_reduce_only
                 ):
                     # Check if we've already processed this order
@@ -1044,7 +1047,7 @@ class ForwardIchimokuTrader:
                     
                     # Update position_size if this is a TP fill (partial close)
                     is_partial_close = False
-                    if order_type == 'TAKE_PROFIT_MARKET':
+                    if order_type == 'TAKE_PROFIT' or order_type == 'TAKE_PROFIT_MARKET':
                         self.position_size = max(0, self.position_size - order_qty)
                         is_partial_close = self.position_size > 0
                         self.logger.info(f"TP filled: {order_qty:.4f}. Remaining position size: {self.position_size:.4f}")
@@ -1086,12 +1089,23 @@ class ForwardIchimokuTrader:
                         # Cancel any remaining SL/TP orders since position is fully closed
                         try:
                             open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+                            conditional_orders = self.client.papi_get_um_conditional_open_orders(symbol=self.symbol)
                             cancelled_count = 0
+
+                            # Cancel regular orders
                             for order in open_orders:
                                 if order['reduceOnly']:
                                     self.client.futures_cancel_order(symbol=self.symbol, orderId=order['orderId'])
                                     self.logger.info(f"Cancelled remaining {order['type']} order {order['orderId']} after full position close")
                                     cancelled_count += 1
+
+                            # Cancel conditional orders
+                            for order in conditional_orders:
+                                if order['reduceOnly']:
+                                    self.client.papi_cancel_um_conditional_order(symbol=self.symbol, orderId=order['orderId'])
+                                    self.logger.info(f"Cancelled remaining conditional {order['type']} order {order['orderId']} after full position close")
+                                    cancelled_count += 1
+
                             if cancelled_count > 0:
                                 self.logger.info(f"Cancelled {cancelled_count} remaining order(s) (SL/TP) after position fully closed")
                         except Exception as e:
@@ -1150,16 +1164,27 @@ class ForwardIchimokuTrader:
                         # Position is closed on exchange or all TPs are confirmed filled - clean up
                         reason = "all 3 TPs confirmed filled" if all_tps_filled else "position closed on exchange"
                         self.logger.info(f"Position for {self.symbol} fully closed ({reason}). Cleaning up remaining orders and resetting state.")
-                        
+
                         # Cancel any remaining SL/TP orders (especially SL since all TPs are filled)
                         try:
                             open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+                            conditional_orders = self.client.papi_get_um_conditional_open_orders(symbol=self.symbol)
                             cancelled_count = 0
+
+                            # Cancel regular orders
                             for order in open_orders:
                                 if order['reduceOnly']:
                                     self.client.futures_cancel_order(symbol=self.symbol, orderId=order['orderId'])
                                     self.logger.info(f"Cancelled remaining {order['type']} order {order['orderId']} (position fully closed)")
                                     cancelled_count += 1
+
+                            # Cancel conditional orders
+                            for order in conditional_orders:
+                                if order['reduceOnly']:
+                                    self.client.papi_cancel_um_conditional_order(symbol=self.symbol, orderId=order['orderId'])
+                                    self.logger.info(f"Cancelled remaining conditional {order['type']} order {order['orderId']} (position fully closed)")
+                                    cancelled_count += 1
+
                             if cancelled_count > 0:
                                 self.logger.info(f"Cancelled {cancelled_count} remaining order(s) (SL/TP) - all TPs filled, position closed")
                             else:
@@ -1325,22 +1350,32 @@ class ForwardIchimokuTrader:
             
             self.sl_level = round(new_sl_price, self._price_precision)
             
-            # Cancel existing SL orders first
+            # Cancel existing SL orders first (both regular and conditional)
             open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+            conditional_orders = self.client.papi_get_um_conditional_open_orders(symbol=self.symbol)
+
+            # Cancel regular orders
             for order in open_orders:
                 if order['type'] == 'STOP_MARKET' and order['reduceOnly']:
                     self.client.futures_cancel_order(symbol=self.symbol, orderId=order['orderId'])
                     self.logger.info(f"Cancelled existing stop-loss order {order['orderId']}")
-            
+
+            # Cancel conditional orders
+            for order in conditional_orders:
+                if order['type'] == 'STOP_MARKET' and order['reduceOnly']:
+                    self.client.papi_cancel_um_conditional_order(symbol=self.symbol, orderId=order['orderId'])
+                    self.logger.info(f"Cancelled existing conditional stop-loss order {order['orderId']}")
+
             time.sleep(0.2) # Give time for cancellation to process
 
             # Create new SL order
             side = Client.SIDE_SELL if self.position == 1 else Client.SIDE_BUY
             sl_params = {
                 'symbol': self.symbol, 'side': side, 'type': 'STOP_MARKET',
-                'quantity': self.position_size, 'stopPrice': self.sl_level, 'reduceOnly': True,'workingType': 'MARK_PRICE',
+                'quantity': self.position_size, 'stopPrice': self.sl_level,
+                'reduceOnly': True, 'workingType': 'MARK_PRICE'
             }
-            sl_order = self.client.futures_create_order(**sl_params)
+            sl_order = self.client.papi_create_um_conditional_order(**sl_params)
             self.orderid = sl_order['orderId']
             self.logger.info(f"SUCCESS: Updated trailing stop. New SL order ID: {self.orderid} at {self.sl_level}")
 
@@ -1410,25 +1445,40 @@ class ForwardIchimokuTrader:
 
     def _cleaning_existing_order(self):
 
-        # First try to cancel all open orders
+        # First try to cancel all open orders (both regular and conditional)
         try:
             open_orders = self.client.futures_get_open_orders(symbol=self.symbol)
+            conditional_orders = self.client.papi_get_um_conditional_open_orders(symbol=self.symbol)
+
+            # Cancel regular orders
             for order in open_orders:
                 try:
                     self.client.futures_cancel_order(
                         symbol=self.symbol,
                         orderId=order['orderId']
                     )
-                    self.logger.info(f"Cancelled order {order['orderId']} for {self.symbol}")
+                    self.logger.info(f"Cancelled regular order {order['orderId']} for {self.symbol}")
                 except Exception as e:
-                    self.logger.error(f"Failed to cancel order {order['orderId']}: {e}")
-                    # Don't return here, continue trying to cancel other orders
+                    self.logger.error(f"Failed to cancel regular order {order['orderId']}: {e}")
                     continue
-            
-            if open_orders:  # If we had any orders to cancel, wait a moment
+
+            # Cancel conditional orders
+            for order in conditional_orders:
+                try:
+                    self.client.papi_cancel_um_conditional_order(
+                        symbol=self.symbol,
+                        orderId=order['orderId']
+                    )
+                    self.logger.info(f"Cancelled conditional order {order['orderId']} for {self.symbol}")
+                except Exception as e:
+                    self.logger.error(f"Failed to cancel conditional order {order['orderId']}: {e}")
+                    continue
+
+            total_orders = len(open_orders) + len(conditional_orders)
+            if total_orders > 0:  # If we had any orders to cancel, wait a moment
                 time.sleep(0.5)
         except Exception as e:
-            self.logger.error(f"Error checking open orders: {e}")
+            self.logger.error(f"Error checking/cancelling orders: {e}")
             
 
     def enter_position(self, direction, entry_price, atr, concurrent_slot_count: int = 1) -> None:
@@ -1693,10 +1743,10 @@ class ForwardIchimokuTrader:
             try:
                 sl_params = {
                     'symbol': self.symbol, 'side': sl_side, 'type': 'STOP_MARKET',
-                    'quantity': self.position_size, 'stopPrice': self.sl_level, 
-                    'reduceOnly': True
+                    'quantity': self.position_size, 'stopPrice': self.sl_level,
+                    'reduceOnly': True, 'workingType': 'MARK_PRICE'
                 }
-                sl_order = self.client.futures_create_order(**sl_params)
+                sl_order = self.client.papi_create_um_conditional_order(**sl_params)
                 self.orderid = sl_order['orderId']
                 self.logger.info(f"SUCCESS: Stop loss order placed. ID: {self.orderid}")
             except Exception as e:
@@ -1711,9 +1761,9 @@ class ForwardIchimokuTrader:
                     'quantity': tp_qty_1,
                     'stopPrice': self.tp_level_1,
                     'reduceOnly': True,
-                    'workingType': 'MARK_PRICE',
+                    'workingType': 'MARK_PRICE'
                 }
-                tp1_order = self.client.futures_create_order(**tp1_params)
+                tp1_order = self.client.papi_create_um_conditional_order(**tp1_params)
                 self.tp_orderid_1 = tp1_order['orderId']
                 self.tp_orderid = self.tp_orderid_1  # Keep for backward compatibility
                 self.logger.info(f"SUCCESS: Take profit order 1 placed. ID: {self.tp_orderid_1}, Price: {self.tp_level_1}, Qty: {tp_qty_1}")
@@ -1728,9 +1778,9 @@ class ForwardIchimokuTrader:
                     'quantity': tp_qty_2,
                     'stopPrice': self.tp_level_2,
                     'reduceOnly': True,
-                    'workingType': 'MARK_PRICE',
+                    'workingType': 'MARK_PRICE'
                 }
-                tp2_order = self.client.futures_create_order(**tp2_params)
+                tp2_order = self.client.papi_create_um_conditional_order(**tp2_params)
                 self.tp_orderid_2 = tp2_order['orderId']
                 self.logger.info(f"SUCCESS: Take profit order 2 placed. ID: {self.tp_orderid_2}, Price: {self.tp_level_2}, Qty: {tp_qty_2}")
             except Exception as e:
@@ -1744,9 +1794,9 @@ class ForwardIchimokuTrader:
                     'quantity': tp_qty_3,
                     'stopPrice': self.tp_level_3,
                     'reduceOnly': True,
-                    'workingType': 'MARK_PRICE',
+                    'workingType': 'MARK_PRICE'
                 }
-                tp3_order = self.client.futures_create_order(**tp3_params)
+                tp3_order = self.client.papi_create_um_conditional_order(**tp3_params)
                 self.tp_orderid_3 = tp3_order['orderId']
                 self.logger.info(f"SUCCESS: Take profit order 3 placed. ID: {self.tp_orderid_3}, Price: {self.tp_level_3}, Qty: {tp_qty_3}")
             except Exception as e:
@@ -1796,7 +1846,7 @@ class ForwardIchimokuTrader:
         self.logger.info(f"Checking {len(symbol_orders)} orders for {self.symbol} for TP/SL hits...")
         for order in symbol_orders:
             if order['status'] == 'FILLED':
-                if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT']:
+                if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS', 'TAKE_PROFIT', 'STOP']:
                     self.logger.info(f"Found TP/SL hit: {order['type']} order {order['orderId']} for {self.symbol}")
                     # Create trade report entry for TP/SL hit
                     exit_price = float(order.get('avgPrice', 0)) or float(order.get('price', 0))
